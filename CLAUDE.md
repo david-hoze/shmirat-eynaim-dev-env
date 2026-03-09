@@ -186,6 +186,98 @@ expect(stats.hidden).toBe(expectedHiddenCount);
 
 Use both approaches. Approach A verifies the data is correct. Approach B verifies the popup UI displays it correctly.
 
+## CRITICAL: Switch from face-api.js to @vladmandic/face-api
+
+The original face-api.js is abandoned and pinned to tfjs 1.7.4. Its WASM backend doesn't support all ops needed for gender classification (inference hangs). Switch to the maintained fork.
+
+### Steps
+
+1. **Download @vladmandic/face-api** from npm or CDN:
+   - npm: `@vladmandic/face-api` (latest version)
+   - CDN: `https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.esm.js` (or the non-ESM bundle)
+   - Place the bundled JS in `lib/` replacing `face-api.min.js`
+
+2. **Download the matching model weights** from https://github.com/nicolo-ribaudo/face-api.js/tree/master/model or from the npm package's `model/` directory. You need:
+   - `tiny_face_detector_model-weights_manifest.json` + shard(s)
+   - `gender_recognition_model-weights_manifest.json` + shard(s)
+   - These replace the old model files in `models/`. The format is compatible but grab the ones from vladmandic's repo to be safe.
+
+3. **Bundle the tfjs WASM backend binaries**. The @vladmandic/face-api build includes tfjs 3.x+. You need the WASM files:
+   - `tfjs-backend-wasm.wasm`
+   - `tfjs-backend-wasm-simd.wasm`
+   - `tfjs-backend-wasm-threaded-simd.wasm`
+   - Get these from `node_modules/@tensorflow/tfjs-backend-wasm/dist/` or from the CDN
+   - Place them in `lib/wasm/`
+   - Add `lib/wasm/*` to `web_accessible_resources` in manifest.json
+
+4. **Update background.js model loading**:
+   ```javascript
+   // Set WASM path BEFORE loading models
+   const wasmPath = browser.runtime.getURL('lib/wasm/');
+   faceapi.tf.setWasmPaths(wasmPath);
+   await faceapi.tf.setBackend('wasm');
+   await faceapi.tf.ready();
+
+   // Then load models as before
+   const modelPath = browser.runtime.getURL('models/');
+   await faceapi.nets.tinyFaceDetector.loadFromUri(modelPath);
+   await faceapi.nets.ageGenderNet.loadFromUri(modelPath);
+   ```
+
+5. **The detection/classification API is identical**. No changes needed to:
+   - `faceapi.detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions()).withAgeAndGender()`
+   - Result format: `.gender` ("male"/"female"), `.genderProbability` (0-1)
+   - Decision logic stays the same
+
+6. **If background.js needs a DOM context for canvas operations**, use `background.html` instead of a plain background script. In manifest.json:
+   ```json
+   "background": {
+     "page": "background.html"
+   }
+   ```
+   And in `background.html`:
+   ```html
+   <!DOCTYPE html>
+   <html><head>
+     <script src="lib/face-api.min.js"></script>
+     <script src="background.js"></script>
+   </head><body></body></html>
+   ```
+
+7. **Test that WASM initializes** by checking the console for backend confirmation:
+   ```javascript
+   console.log("[Shmirat Eynaim] tfjs backend:", faceapi.tf.getBackend());
+   // Should print "wasm", not "cpu"
+   ```
+
+8. **If WASM fails to load** (missing files, CSP issues), fall back to CPU:
+   ```javascript
+   try {
+     faceapi.tf.setWasmPaths(wasmPath);
+     await faceapi.tf.setBackend('wasm');
+     await faceapi.tf.ready();
+   } catch (err) {
+     console.warn("[Shmirat Eynaim] WASM failed, falling back to CPU:", err);
+     await faceapi.tf.setBackend('cpu');
+     await faceapi.tf.ready();
+   }
+   ```
+
+9. **CSP note**: Firefox extensions block inline scripts. All scripts must be loaded via `<script src="...">` in background.html, never inline. The WASM files must be in `web_accessible_resources`.
+
+### Expected result
+- WASM backend loads successfully
+- detectAllFaces().withAgeAndGender() completes in 1-3 seconds per image (vs 15-30s on CPU)
+- All existing tests pass within their timeouts
+- No API changes needed in content.js or popup.js
+
+### Verification
+After making this switch, run:
+```bash
+npm test
+```
+The stats query test should now pass — images should move from "pending" to "safe" or "blocked" within the test timeout.
+
 ## Multi-Agent Collaboration
 
 Read and follow the instructions in CLAUDE_COLLAB.md for multi-agent coordination.

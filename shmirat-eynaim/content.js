@@ -151,7 +151,7 @@
       img.onload = () => {
         clearTimeout(timer);
         try {
-          const maxDim = 512;
+          const maxDim = 256;
           let w = img.naturalWidth;
           let h = img.naturalHeight;
           if (w > maxDim || h > maxDim) {
@@ -486,6 +486,11 @@
       elements.forEach(el => feedbackThenSafe(el));
     }
   });
+
+  // --- Log background debug status ---
+  browser.runtime.sendMessage({ type: "getDebugStatus" }).then(status => {
+    console.log("[SE] Background status:", JSON.stringify(status));
+  }).catch(() => {});
 
   // --- Initial sweep ---
 

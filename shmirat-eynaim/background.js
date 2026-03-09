@@ -2,6 +2,8 @@
 
 let modelsLoaded = false;
 let modelsLoading = false;
+let analyzeCount = 0;
+let analyzeErrors = [];
 let blockingEnabled = true;
 let whitelist = [];
 
@@ -163,49 +165,18 @@ function classifyDescriptor(descriptor) {
 
 // --- Model loading ---
 
-// Manually load a face-api.js model by fetching weights ourselves,
-// bypassing tf.io.loadWeights which fails in Firefox extension background.
+// Load a face-api.js model by fetching the manifest ourselves
+// (loadFromUri fails because getModelUris strips moz-extension:// protocol).
+// We fetch the manifest with our own fetch(), then use tf.io.loadWeights
+// which also uses fetch() internally (works fine with moz-extension://).
 async function loadNetFromUri(net, modelName, basePath) {
   const manifestUrl = basePath + modelName + "-weights_manifest.json";
   const manifestResp = await fetch(manifestUrl);
   if (!manifestResp.ok) throw new Error(`Manifest fetch failed: ${manifestResp.status} ${manifestUrl}`);
   const manifest = await manifestResp.json();
 
-  // Fetch all unique shard files
-  const shardCache = {};
-  for (const group of manifest) {
-    for (const path of group.paths) {
-      if (!shardCache[path]) {
-        const shardResp = await fetch(basePath + path);
-        if (!shardResp.ok) throw new Error(`Shard fetch failed: ${shardResp.status} ${path}`);
-        shardCache[path] = await shardResp.arrayBuffer();
-      }
-    }
-  }
-
-  // Decode weights for each group and merge into a single weight map
-  const weightMap = {};
-  for (const group of manifest) {
-    // Concatenate shard buffers for this group
-    const buffers = group.paths.map(p => shardCache[p]);
-    let totalLen = 0;
-    for (const b of buffers) totalLen += b.byteLength;
-    const combined = new ArrayBuffer(totalLen);
-    const view = new Uint8Array(combined);
-    let offset = 0;
-    for (const b of buffers) {
-      view.set(new Uint8Array(b), offset);
-      offset += b.byteLength;
-    }
-
-    // Decode using tf.js (handles quantization)
-    const decoded = faceapi.tf.io.decodeWeights(combined, group.weights);
-    for (const name in decoded) {
-      weightMap[name] = decoded[name];
-    }
-  }
-
-  // Load into the face-api.js net
+  // tf.io.loadWeights fetches shards relative to modelBaseUri
+  const weightMap = await faceapi.tf.io.loadWeights(manifest, basePath);
   net.loadFromWeightMap(weightMap);
 }
 
@@ -214,10 +185,20 @@ async function loadModels() {
   modelsLoading = true;
 
   try {
-    // Force CPU backend — WebGL isn't available in background pages
-    await faceapi.tf.setBackend('cpu');
-    await faceapi.tf.ready();
-    console.log("[Shmirat Eynaim] TF backend:", faceapi.tf.getBackend());
+    // Try WASM backend first (faster), fall back to CPU
+    let backend = 'cpu';
+    try {
+      const wasmPath = browser.runtime.getURL("lib/wasm/");
+      faceapi.tf.setWasmPaths(wasmPath);
+      await faceapi.tf.setBackend('wasm');
+      await faceapi.tf.ready();
+      backend = 'wasm';
+    } catch (wasmErr) {
+      console.warn("[Shmirat Eynaim] WASM backend failed, using CPU:", wasmErr.message);
+      await faceapi.tf.setBackend('cpu');
+      await faceapi.tf.ready();
+    }
+    console.log("[Shmirat Eynaim] TF backend:", backend);
 
     const basePath = browser.runtime.getURL("models/");
     console.log("[Shmirat Eynaim] Loading models from:", basePath);
@@ -267,7 +248,6 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
   if (!modelsLoaded) {
     const loaded = await loadModels();
     if (!loaded) {
-      // Models unavailable — strict mode: block image
       return { containsWomen: true, error: "models_not_loaded" };
     }
   }
@@ -279,7 +259,8 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
     const imageBitmap = await createImageBitmap(blob);
 
     // Draw to OffscreenCanvas for analysis
-    const maxDim = 512;
+    // Use 256px max for speed — sufficient for face detection
+    const maxDim = 256;
     let width = imageBitmap.width;
     let height = imageBitmap.height;
 
@@ -295,18 +276,43 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
     ctx.drawImage(imageBitmap, 0, 0, width, height);
     imageBitmap.close();
 
-    // Run face detection with landmarks, descriptors, and gender
-    const detections = await faceapi
-      .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
-      .withFaceLandmarks(true) // true = use tiny model
-      .withFaceDescriptors()
-      .withAgeAndGender();
+    // Check if learning system has data — if so, we need descriptors
+    const needDescriptors = knownFaces.length > 0 ||
+      knownSafeFaces.length > 0 ||
+      classifierWeights !== null;
+
+    const t0 = performance.now();
+
+    // Wrap detection in a timeout to detect hangs
+    const DETECT_TIMEOUT = 60_000; // 60 seconds
+    let detections;
+    const detectionPromise = (async () => {
+      if (needDescriptors) {
+        return faceapi
+          .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
+          .withFaceLandmarks(true)
+          .withFaceDescriptors()
+          .withAgeAndGender();
+      } else {
+        return faceapi
+          .detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
+          .withAgeAndGender();
+      }
+    })();
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("detection_timeout")), DETECT_TIMEOUT)
+    );
+
+    detections = await Promise.race([detectionPromise, timeoutPromise]);
+
+    const t1 = performance.now();
+    console.log("[Shmirat Eynaim] Detection:", Math.round(t1 - t0), "ms, faces:", detections ? detections.length : 0);
 
     let containsWomen = false;
 
     if (detections && detections.length > 0) {
       for (const det of detections) {
-        const descriptor = Array.from(det.descriptor);
         let flagBlock = false;
         let flagSafe = false;
 
@@ -315,17 +321,20 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
           flagBlock = true;
         }
 
-        // b. KNN checks
-        if (matchesKnownBlockedFace(descriptor)) {
-          flagBlock = true;
-        }
-        if (matchesKnownSafeFace(descriptor)) {
-          flagSafe = true; // override
-        }
+        // b. KNN + classifier checks (only when descriptors available)
+        if (needDescriptors && det.descriptor) {
+          const descriptor = Array.from(det.descriptor);
 
-        // c. Custom classifier
-        if (classifierWeights && classifyDescriptor(descriptor) > 0.5) {
-          flagBlock = true;
+          if (matchesKnownBlockedFace(descriptor)) {
+            flagBlock = true;
+          }
+          if (matchesKnownSafeFace(descriptor)) {
+            flagSafe = true; // override
+          }
+
+          if (classifierWeights && classifyDescriptor(descriptor) > 0.5) {
+            flagBlock = true;
+          }
         }
 
         // If flagged block and NOT overridden by safe
@@ -557,6 +566,17 @@ if (menusAPI) {
 
 browser.runtime.onMessage.addListener((msg, sender) => {
   switch (msg.type) {
+    case "getDebugStatus":
+      return Promise.resolve({
+        modelsLoaded,
+        modelsLoading,
+        backend: faceapi.tf.getBackend(),
+        blockingEnabled,
+        cacheSize: analysisCache.size,
+        analyzeCount,
+        analyzeErrors: analyzeErrors.slice(-5),
+      });
+
     case "getState":
       return Promise.resolve({
         blockingEnabled,
@@ -604,8 +624,11 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     }
 
     case "analyzeImage": {
-      // Content script sends image data URL + original URL for analysis
-      return analyzeImageData(msg.imageDataUrl, msg.originalUrl);
+      analyzeCount++;
+      return analyzeImageData(msg.imageDataUrl, msg.originalUrl).catch(e => {
+        analyzeErrors.push(e.message || String(e));
+        return { containsWomen: true, error: e.message };
+      });
     }
 
     case "fetchImage": {

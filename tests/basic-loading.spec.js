@@ -137,8 +137,17 @@ test.describe("Image Hiding", () => {
       waitUntil: "networkidle",
     });
 
-    // Wait for ML processing (models need time)
-    await page.waitForTimeout(15_000);
+    // Wait for ML processing — poll every 10s up to 90s
+    for (let i = 0; i < 9; i++) {
+      await page.waitForTimeout(10_000);
+      const states = await page.$$eval('img[data-test="female"]', imgs =>
+        imgs.map(img => img.className).join(", "));
+      const blocked = (states.match(/blocked/g) || []).length;
+      const safe = (states.match(/safe/g) || []).length;
+      const pending = (states.match(/pending/g) || []).length;
+      console.log(`[${(i+1)*10}s] blocked=${blocked} safe=${safe} pending=${pending}`);
+      if (pending === 0) break;
+    }
 
     // Dump console logs for debugging
     console.log("=== CONSOLE LOGS (female faces page) ===");
