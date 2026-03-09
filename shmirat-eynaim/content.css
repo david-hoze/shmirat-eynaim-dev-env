@@ -1,0 +1,31 @@
+/* Images start hidden until analyzed */
+.shmirat-eynaim-pending {
+  opacity: 0 !important;
+  transition: opacity 0.2s ease-in-out;
+}
+
+/* Images confirmed safe fade in */
+.shmirat-eynaim-safe {
+  opacity: 1 !important;
+  transition: opacity 0.2s ease-in-out;
+}
+
+/* Images containing women are fully hidden */
+.shmirat-eynaim-blocked {
+  display: none !important;
+}
+
+/* Visual feedback when user flags an image */
+.shmirat-eynaim-feedback-block {
+  outline: 3px solid #e74c3c !important;
+  outline-offset: -3px;
+  opacity: 1 !important;
+  transition: opacity 0.3s ease-out;
+}
+
+.shmirat-eynaim-feedback-safe {
+  outline: 3px solid #2ecc71 !important;
+  outline-offset: -3px;
+  opacity: 1 !important;
+  transition: opacity 0.2s ease-in;
+}

@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "command": "bash .claude/hooks/session-start-init.sh"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "command": "bash .claude/hooks/pre-edit-claim.sh"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "command": "bash .claude/hooks/session-end-cleanup.sh"
+      }
+    ]
+  }
+}

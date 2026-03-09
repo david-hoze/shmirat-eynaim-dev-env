@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test: Mixed Images</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+    .section { margin-bottom: 32px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, 250px); gap: 16px; }
+    .grid img, .grid .bg-box { width: 240px; height: 180px; object-fit: cover; border-radius: 8px; }
+    .bg-box { display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; background-size: cover; background-position: center; }
+  </style>
+</head>
+<body>
+  <h1>Mixed Content Test Page</h1>
+
+  <div class="section">
+    <h2>Should Be HIDDEN (female faces)</h2>
+    <div class="grid">
+      <img src="https://randomuser.me/api/portraits/women/10.jpg" alt="woman" data-test="female">
+      <img src="https://randomuser.me/api/portraits/women/20.jpg" alt="woman" data-test="female">
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Should Be VISIBLE (male faces)</h2>
+    <div class="grid">
+      <img src="https://randomuser.me/api/portraits/men/10.jpg" alt="man" data-test="male">
+      <img src="https://randomuser.me/api/portraits/men/20.jpg" alt="man" data-test="male">
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Should Be VISIBLE (no people)</h2>
+    <div class="grid">
+      <img src="https://picsum.photos/seed/city/400/300" alt="city" data-test="landscape">
+      <img src="https://picsum.photos/seed/food/400/300" alt="food" data-test="object">
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Edge Cases</h2>
+    <div class="grid">
+      <!-- Background image with female face — should hide the element -->
+      <div class="bg-box" style="background-image: url('https://randomuser.me/api/portraits/women/30.jpg');" data-test="bg-female">
+        BG Image
+      </div>
+      <!-- Lazy-loaded image -->
+      <img data-src="https://randomuser.me/api/portraits/women/40.jpg" alt="lazy" data-test="lazy-female" width="240" height="180">
+      <!-- Broken image — strict mode should hide -->
+      <img src="https://invalid.example.com/does-not-exist.jpg" alt="broken" data-test="broken" width="240" height="180">
+    </div>
+  </div>
+
+  <!-- Simulate lazy-load trigger -->
+  <script>
+    setTimeout(() => {
+      document.querySelectorAll('img[data-src]').forEach(img => {
+        img.src = img.dataset.src;
+      });
+    }, 2000);
+  </script>
+
+  <div id="results" style="margin-top: 40px; padding: 16px; background: white; border-radius: 8px;">
+    <h2>Test Results</h2>
+    <p id="count">Checking...</p>
+    <script>
+      setTimeout(() => {
+        const results = [];
+        document.querySelectorAll('[data-test]').forEach(el => {
+          const s = getComputedStyle(el);
+          const isHidden = s.display === 'none' || s.visibility === 'hidden' ||
+            parseFloat(s.opacity) === 0 || el.classList.contains('shmirat-eynaim-blocked');
+          const type = el.dataset.test;
+          const shouldHide = type.includes('female') || type === 'broken';
+          const correct = shouldHide ? isHidden : !isHidden;
+          results.push({ type, isHidden, shouldHide, correct });
+        });
+        const pass = results.filter(r => r.correct).length;
+        const total = results.length;
+        document.getElementById('count').textContent =
+          `${pass}/${total} correct. ${pass === total ? '✅ ALL PASS' : '❌ SOME FAILURES'}`;
+        console.table(results);
+      }, 15000);
+    </script>
+  </div>
+</body>
+</html>

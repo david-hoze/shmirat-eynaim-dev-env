@@ -1,0 +1,4 @@
+{
+  "build": {"default_ttl": 300, "description": "Build / compile"},
+  "test": {"default_ttl": 1200, "description": "Test suite"}
+}

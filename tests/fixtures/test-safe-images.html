@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test: Safe Images — All Should Be Visible</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+    .section { margin-bottom: 32px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, 250px); gap: 16px; }
+    .grid img { width: 240px; height: 180px; object-fit: cover; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Safe Images Test Page</h1>
+  <p>All images below should remain visible (no faces, or male-only faces).</p>
+
+  <div class="section">
+    <h2>Landscapes (no people)</h2>
+    <div class="grid">
+      <img src="https://picsum.photos/seed/mountain/400/300" alt="mountain" data-test="landscape">
+      <img src="https://picsum.photos/seed/ocean/400/300" alt="ocean" data-test="landscape">
+      <img src="https://picsum.photos/seed/forest/400/300" alt="forest" data-test="landscape">
+      <img src="https://picsum.photos/seed/desert/400/300" alt="desert" data-test="landscape">
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Objects (no people)</h2>
+    <div class="grid">
+      <img src="https://picsum.photos/seed/coffee/400/300" alt="coffee" data-test="object">
+      <img src="https://picsum.photos/seed/laptop/400/300" alt="laptop" data-test="object">
+      <img src="https://picsum.photos/seed/book/400/300" alt="book" data-test="object">
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Male Portraits (should stay visible)</h2>
+    <div class="grid">
+      <img src="https://randomuser.me/api/portraits/men/1.jpg" alt="man 1" data-test="male">
+      <img src="https://randomuser.me/api/portraits/men/2.jpg" alt="man 2" data-test="male">
+      <img src="https://randomuser.me/api/portraits/men/3.jpg" alt="man 3" data-test="male">
+      <img src="https://randomuser.me/api/portraits/men/4.jpg" alt="man 4" data-test="male">
+    </div>
+  </div>
+
+  <div id="results" style="margin-top: 40px; padding: 16px; background: white; border-radius: 8px;">
+    <h2>Test Results</h2>
+    <p id="count">Checking...</p>
+    <script>
+      setTimeout(() => {
+        const imgs = document.querySelectorAll('img[data-test]');
+        let hidden = 0;
+        imgs.forEach(img => {
+          const s = getComputedStyle(img);
+          if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0 || img.classList.contains('shmirat-eynaim-blocked')) {
+            hidden++;
+          }
+        });
+        document.getElementById('count').textContent =
+          `${imgs.length} safe images, ${hidden} hidden. ${hidden === 0 ? '✅ PASS' : '⚠️ WARNING — ' + hidden + ' safe images incorrectly hidden (false positives)'}`;
+      }, 12000);
+    </script>
+  </div>
+</body>
+</html>
