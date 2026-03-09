@@ -25,6 +25,20 @@
       <button id="whitelist-btn" class="btn">Trust this site</button>
     </div>
 
+    <div class="cloud-row">
+      <h2>Cloud API (Claude Haiku)</h2>
+      <div class="api-key-row">
+        <input type="password" id="api-key" placeholder="Anthropic API key" autocomplete="off">
+        <button id="save-key-btn" class="btn">Save</button>
+      </div>
+      <div class="cloud-mode-row">
+        <label><input type="radio" name="cloud-mode" value="all"> All images</label>
+        <label><input type="radio" name="cloud-mode" value="uncertain"> Uncertain only</label>
+        <label><input type="radio" name="cloud-mode" value="never"> Local only</label>
+      </div>
+      <p id="cloud-stats" class="cloud-stats">No API key set.</p>
+    </div>
+
     <div class="learning-row">
       <h2>Learning</h2>
       <p id="learning-stats">No faces learned yet.</p>

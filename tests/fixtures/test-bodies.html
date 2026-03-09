@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test: Person Bodies Without Visible Faces — All Should Be Hidden</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, 250px); gap: 16px; }
+    .grid img { width: 240px; height: 180px; object-fit: cover; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Person Body Test Page (No Visible Faces)</h1>
+  <p>All images below show people without clearly visible faces. They should be hidden by the extension (strict mode: person + no identifiable male face = hide).</p>
+
+  <div class="grid">
+    <!-- Person from behind / silhouette / cropped face -->
+    <img src="https://images.unsplash.com/photo-1485811055555-1e1eee94b689?w=400&h=300&fit=crop" alt="person from behind" data-test="person-no-face">
+    <img src="https://images.unsplash.com/photo-1504439468489-c8920d796a29?w=400&h=300&fit=crop" alt="silhouette of person" data-test="person-no-face">
+    <img src="https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400&h=300&fit=crop" alt="person walking away" data-test="person-no-face">
+    <img src="https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400&h=300&fit=crop" alt="person side view" data-test="person-no-face">
+    <img src="https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400&h=300&fit=crop" alt="person looking down" data-test="person-no-face">
+    <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&h=300&fit=crop" alt="person body crop" data-test="person-no-face">
+  </div>
+
+  <div id="results" style="margin-top: 40px; padding: 16px; background: white; border-radius: 8px;">
+    <h2>Test Results</h2>
+    <p id="count">Checking...</p>
+    <script>
+      setTimeout(() => {
+        const imgs = document.querySelectorAll('img[data-test="person-no-face"]');
+        let hidden = 0;
+        imgs.forEach(img => {
+          const s = getComputedStyle(img);
+          if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0 || img.classList.contains('shmirat-eynaim-blocked')) {
+            hidden++;
+          }
+        });
+        document.getElementById('count').textContent =
+          `${imgs.length} person images, ${hidden} hidden. ${hidden === imgs.length ? 'PASS — all hidden' : 'FAIL — ' + (imgs.length - hidden) + ' images leaked through'}`;
+      }, 15000);
+    </script>
+  </div>
+</body>
+</html>

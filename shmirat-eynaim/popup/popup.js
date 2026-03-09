@@ -12,6 +12,10 @@ const resetBtn = document.getElementById("reset-btn");
 const exportBtn = document.getElementById("export-btn");
 const importBtn = document.getElementById("import-btn");
 const importFile = document.getElementById("import-file");
+const apiKeyInput = document.getElementById("api-key");
+const saveKeyBtn = document.getElementById("save-key-btn");
+const cloudStatsEl = document.getElementById("cloud-stats");
+const cloudModeRadios = document.querySelectorAll('input[name="cloud-mode"]');
 
 let currentDomain = "";
 let currentState = {};
@@ -97,6 +101,23 @@ async function updateLearningStats() {
   }
 }
 
+async function updateCloudStats() {
+  try {
+    const stats = await browser.runtime.sendMessage({ type: "getCloudStats" });
+    // Set the radio button
+    cloudModeRadios.forEach(r => { r.checked = r.value === stats.cloudMode; });
+    if (!stats.hasApiKey) {
+      cloudStatsEl.textContent = "No API key set.";
+    } else {
+      const cost = (stats.cloudCallsToday * 0.002).toFixed(3);
+      cloudStatsEl.textContent =
+        `Today: ${stats.cloudCallsToday} API calls (~$${cost}) | ${stats.cloudSavedCount} saved locally | ${stats.cloudCacheSize} cached URLs`;
+    }
+  } catch {
+    cloudStatsEl.textContent = "No API key set.";
+  }
+}
+
 function render() {
   toggle.checked = currentState.blockingEnabled;
   domainEl.textContent = currentDomain || "\u2014";
@@ -104,6 +125,7 @@ function render() {
   updateWhitelistBtn();
   updateStats();
   updateLearningStats();
+  updateCloudStats();
 }
 
 // Init
@@ -169,4 +191,21 @@ whitelistBtn.addEventListener("click", async () => {
   });
   currentState = resp;
   render();
+});
+
+// Cloud API key save handler
+saveKeyBtn.addEventListener("click", async () => {
+  const key = apiKeyInput.value.trim();
+  await browser.runtime.sendMessage({ type: "setApiKey", key });
+  apiKeyInput.value = "";
+  apiKeyInput.placeholder = key ? "Key saved" : "Anthropic API key";
+  updateCloudStats();
+});
+
+// Cloud mode toggle handler
+cloudModeRadios.forEach(radio => {
+  radio.addEventListener("change", async (e) => {
+    await browser.runtime.sendMessage({ type: "setCloudMode", mode: e.target.value });
+    updateCloudStats();
+  });
 });

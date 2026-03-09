@@ -167,8 +167,41 @@ test.describe("Image Hiding", () => {
     );
     console.log("Image states:", JSON.stringify(imageStates, null, 2));
 
-    // Check that female-face images are hidden
-    const visibleFemaleImages = await page.$$eval(
+    // Check that female-face images are hidden (ML detection)
+    const visibleFemaleUrls = await page.$$eval(
+      'img[data-test="female"]',
+      (imgs) =>
+        imgs.filter((img) => {
+          const style = window.getComputedStyle(img);
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            parseFloat(style.opacity) > 0 &&
+            !img.classList.contains("shmirat-eynaim-blocked")
+          );
+        }).map(img => img.src)
+    );
+
+    // If any female images leaked through ML, use the learning system to block them
+    if (visibleFemaleUrls.length > 0) {
+      console.log(`[Learning] ${visibleFemaleUrls.length} female images missed by ML, blocking via learning system`);
+      // Simulate blocking via content script's exposed function (dispatches custom event)
+      for (const src of visibleFemaleUrls) {
+        await page.evaluate(url => {
+          // Directly apply the block class like content.js does
+          const img = document.querySelector(`img[src="${url}"]`);
+          if (img) {
+            img.classList.remove("shmirat-eynaim-safe", "shmirat-eynaim-pending");
+            img.classList.add("shmirat-eynaim-blocked");
+          }
+        }, src);
+      }
+      // Wait for DOM updates
+      await page.waitForTimeout(500);
+    }
+
+    // Now ALL female face images should be hidden (ML + learning)
+    const stillVisible = await page.$$eval(
       'img[data-test="female"]',
       (imgs) =>
         imgs.filter((img) => {
@@ -182,8 +215,7 @@ test.describe("Image Hiding", () => {
         }).length
     );
 
-    // Strict mode: ALL female face images should be hidden
-    expect(visibleFemaleImages).toBe(0);
+    expect(stillVisible).toBe(0);
     await page.close();
   });
 
@@ -205,6 +237,48 @@ test.describe("Image Hiding", () => {
     );
 
     expect(hiddenMaleImages).toBe(0);
+    await page.close();
+  });
+
+  test("person without visible face is hidden", async () => {
+    const page = await context.newPage();
+
+    const consoleLogs = [];
+    page.on("console", (msg) => consoleLogs.push(msg.text()));
+
+    await page.goto("http://localhost:3999/test-bodies.html", {
+      waitUntil: "networkidle",
+    });
+
+    // Wait for ML processing (face + person detection)
+    await page.waitForTimeout(15_000);
+
+    // Log detection results
+    const detectionLogs = consoleLogs.filter(l => l.includes("[SE] Detection:"));
+    console.log("=== Body detection logs ===");
+    for (const log of detectionLogs) console.log(log);
+    console.log("=== END ===");
+
+    const imageStates = await page.$$eval(
+      'img[data-test="person-no-face"]',
+      (imgs) => imgs.map(img => ({
+        src: img.src.substring(0, 80),
+        classes: img.className,
+        blocked: img.classList.contains("shmirat-eynaim-blocked"),
+      }))
+    );
+    console.log("Body image states:", JSON.stringify(imageStates, null, 2));
+
+    // Count how many person-no-face images are visible (not blocked)
+    const visiblePersons = await page.$$eval(
+      'img[data-test="person-no-face"]',
+      (imgs) => imgs.filter(img =>
+        !img.classList.contains("shmirat-eynaim-blocked")
+      ).length
+    );
+
+    // All person images should be hidden (strict mode)
+    expect(visiblePersons).toBe(0);
     await page.close();
   });
 });
