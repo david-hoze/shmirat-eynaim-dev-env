@@ -28,7 +28,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["lib/face-api.min.js", "lib/tf-global-shim.js", "lib/coco-ssd.min.js", "content.js"],
+      "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_end",
       "all_frames": true

@@ -1,5 +1,5 @@
-// background.js — State management, learning data persistence, and popup messaging
-// ML inference runs in content.js (WASM-accelerated)
+// background.js — State management, ML inference (off main thread), learning,
+// cloud classification (Haiku), shared server communication, and popup messaging
 
 let blockingEnabled = true;
 let whitelist = [];
@@ -134,6 +134,521 @@ function trainClassifier() {
 
   classifierWeights = { weights, bias };
   console.log("[Shmirat Eynaim] Classifier trained on", trainingData.length, "examples");
+}
+
+// --- ML Detection (runs on background thread, off main page thread) ---
+
+let modelsLoaded = false;
+let modelsLoading = false;
+let mlBackend = "none";
+let personDetector = null;
+
+async function loadNetFromUri(net, modelName, basePath) {
+  const manifestUrl = basePath + modelName + "-weights_manifest.json";
+  const manifestResp = await fetch(manifestUrl);
+  if (!manifestResp.ok) throw new Error(`Manifest fetch failed: ${manifestResp.status} ${manifestUrl}`);
+  const manifest = await manifestResp.json();
+  const weightMap = await faceapi.tf.io.loadWeights(manifest, basePath);
+  net.loadFromWeightMap(weightMap);
+}
+
+async function loadModels() {
+  if (modelsLoaded || modelsLoading) return modelsLoaded;
+  modelsLoading = true;
+
+  try {
+    // Background page can try WebGL (content scripts can't due to SecurityError).
+    // Fall back to WASM, then CPU.
+    const backends = ['webgl', 'wasm', 'cpu'];
+    for (const backend of backends) {
+      try {
+        if (backend === 'wasm') {
+          const wasmPath = browser.runtime.getURL("lib/wasm/");
+          faceapi.tf.setWasmPaths(wasmPath);
+        }
+        await faceapi.tf.setBackend(backend);
+        await faceapi.tf.ready();
+        mlBackend = backend;
+        break;
+      } catch (err) {
+        console.warn(`[SE] ${backend} backend failed:`, err.message);
+      }
+    }
+    console.log("[SE] TF backend:", mlBackend);
+
+    const basePath = browser.runtime.getURL("models/");
+    await loadNetFromUri(faceapi.nets.tinyFaceDetector, "tiny_face_detector_model", basePath);
+    await loadNetFromUri(faceapi.nets.ageGenderNet, "age_gender_model", basePath);
+    await loadNetFromUri(faceapi.nets.faceLandmark68TinyNet, "face_landmark_68_tiny_model", basePath);
+    await loadNetFromUri(faceapi.nets.faceRecognitionNet, "face_recognition_model", basePath);
+
+    try {
+      const cocoModelUrl = browser.runtime.getURL("models/coco-ssd/model.json");
+      personDetector = await cocoSsd.load({
+        base: "lite_mobilenet_v2",
+        modelUrl: cocoModelUrl,
+      });
+      console.log("[SE] COCO-SSD person detector loaded");
+    } catch (cocoErr) {
+      console.warn("[SE] COCO-SSD failed to load:", cocoErr.message);
+      personDetector = null;
+    }
+
+    modelsLoaded = true;
+    console.log("[SE] Models loaded successfully");
+  } catch (err) {
+    console.error("[SE] Failed to load models:", err);
+    modelsLoaded = false;
+  }
+  modelsLoading = false;
+  return modelsLoaded;
+}
+
+// Start loading models immediately
+const modelsReadyPromise = loadModels();
+
+function dataUrlToImageData(dataUrl) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+      let { width, height } = bitmap;
+      const maxDim = 416;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0, width, height);
+      bitmap.close();
+      resolve(ctx.getImageData(0, 0, width, height));
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function imageDataToTensor(imageData) {
+  const { data, width, height } = imageData;
+  const rgb = new Uint8Array(width * height * 3);
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+    rgb[j] = data[i];
+    rgb[j + 1] = data[i + 1];
+    rgb[j + 2] = data[i + 2];
+  }
+  return faceapi.tf.tensor3d(rgb, [height, width, 3], "int32");
+}
+
+// Learning helpers (KNN + classifier)
+function euclideanDistance(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+function matchesKnownBlockedFace(descriptor) {
+  for (const entry of knownFaces) {
+    if (euclideanDistance(descriptor, entry.descriptor) < 0.5) return true;
+  }
+  return false;
+}
+
+function matchesKnownSafeFace(descriptor) {
+  for (const entry of knownSafeFaces) {
+    if (euclideanDistance(descriptor, entry.descriptor) < 0.4) return true;
+  }
+  return false;
+}
+
+function classifyDescriptor(descriptor) {
+  if (!classifierWeights) return 0;
+  let z = classifierWeights.bias;
+  for (let i = 0; i < descriptor.length; i++) {
+    z += classifierWeights.weights[i] * descriptor[i];
+  }
+  return 1 / (1 + Math.exp(-z));
+}
+
+async function runPersonDetection(tensorInput) {
+  if (!personDetector) return [];
+  try {
+    const predictions = await personDetector.detect(tensorInput, 20, 0.3);
+    return predictions.filter(p =>
+      p.class === "person" && p.score > 0.5 && p.bbox[2] > 60 && p.bbox[3] > 60
+    );
+  } catch (err) {
+    console.warn("[SE] Person detection error:", err.message);
+    return [];
+  }
+}
+
+// --- RxJS classification pipeline ---
+// All sources run in parallel. Each emits a result with a priority.
+// Higher-priority sources override lower ones. Haiku always wins over ML.
+//
+// Priority (highest wins):
+//   0 = local cache (instant, but trust depends on original source)
+//   1 = ML (local face-api + COCO-SSD)
+//   2 = server (community consensus, 2+ votes)
+//   3 = haiku (Claude API — most trusted)
+//   4 = user manual (explicit block/safe — absolute override)
+
+const { ReplaySubject, merge, from, of, EMPTY } = rxjs;
+const { filter, map, scan, distinctUntilChanged, tap, catchError } = rxjs.operators;
+
+const PRIORITY = { CACHE: 0, ML: 1, SERVER: 2, HAIKU: 3, USER: 4 };
+
+// In-flight deduplication: url → { subject, subscription }
+const inFlightClassifications = new Map();
+
+// Notify all tabs of a classification update
+function notifyTabs(url, containsWomen, reason) {
+  browser.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      browser.tabs.sendMessage(tab.id, {
+        type: "classificationOverride",
+        url, containsWomen, reason,
+      }).catch(() => {});
+    }
+  });
+}
+
+// Create the observable pipeline for a single image URL.
+// Returns an Observable that emits { containsWomen, reason, priority } as
+// each source resolves, using scan to track the highest-priority result.
+function createClassificationPipeline(url, imageDataUrl) {
+  const sources = [];
+
+  // Source 1: Local cache (sync)
+  if (cloudCache[url]) {
+    sources.push(of({
+      containsWomen: cloudCache[url].containsWomen,
+      reason: "cloud-cache",
+      priority: PRIORITY.CACHE,
+    }));
+  }
+
+  // Source 2: Server check (async network)
+  if (serverEnabled && serverToken) {
+    const server$ = from((async () => {
+      const hash = await hashUrl(url);
+      const data = await serverFetch("/api/classifications/batch", {
+        method: "POST",
+        body: JSON.stringify({ hashes: [hash] }),
+      });
+      if (data && data.results && data.results[hash]) {
+        const sv = data.results[hash];
+        const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
+        if (totalVotes >= 2) {
+          return { containsWomen: sv.containsWomen, reason: "server", priority: PRIORITY.SERVER };
+        }
+      }
+      return null; // server doesn't have a trusted result
+    })()).pipe(
+      filter(r => r !== null),
+      catchError(() => EMPTY),
+    );
+    sources.push(server$);
+  }
+
+  // Source 3: Local ML (async, CPU/WASM/WebGL)
+  // Shared via a ReplaySubject so Haiku (in "uncertain" mode) can wait for it
+  const mlSubject = new ReplaySubject(1);
+  const ml$ = from(runMLDetection(url, imageDataUrl)).pipe(
+    map(r => ({
+      ...r,
+      reason: r.reason || "local",
+      priority: PRIORITY.ML,
+    })),
+    tap(mlResult => {
+      mlSubject.next(mlResult);
+      mlSubject.complete();
+      // Side effect: submit ML result to server (non-blocking)
+      if (serverEnabled && serverToken) {
+        hashUrl(url).then(hash => {
+          serverSubmitClassification(hash, mlResult.containsWomen, mlResult.reason, 0.8);
+        }).catch(() => {});
+      }
+    }),
+    catchError(err => {
+      console.error("[SE] ML detection error:", err.message);
+      const fallback = { containsWomen: true, reason: "ml-error", priority: PRIORITY.ML };
+      mlSubject.next(fallback);
+      mlSubject.complete();
+      return of(fallback);
+    }),
+  );
+  sources.push(ml$);
+
+  // Source 4: Haiku (async API call — most trusted)
+  if (anthropicApiKey && cloudMode !== "never") {
+    if (cloudMode === "all") {
+      // "all" mode: run Haiku in parallel with ML — don't wait
+      const haiku$ = from(handleCloudClassify(url, imageDataUrl, null)).pipe(
+        filter(r => r !== null),
+        map(r => ({
+          containsWomen: r.containsWomen,
+          reason: "haiku",
+          priority: PRIORITY.HAIKU,
+          raw: r.raw,
+        })),
+        catchError(() => EMPTY),
+      );
+      sources.push(haiku$);
+    } else {
+      // "uncertain" mode: wait for ML, only call Haiku if ML isn't confident
+      const { switchMap } = rxjs.operators;
+      const haiku$ = mlSubject.pipe(
+        switchMap(mlResult => {
+          // Skip Haiku if ML is confident (KNN match or high classifier score)
+          if (mlResult.knnDistance !== undefined && mlResult.knnDistance < 0.3) {
+            cloudSavedCount++;
+            return EMPTY;
+          }
+          if (mlResult.classifierConfidence !== undefined && mlResult.classifierConfidence > 0.9) {
+            cloudSavedCount++;
+            return EMPTY;
+          }
+          return from(handleCloudClassify(url, imageDataUrl, {
+            source: mlResult.reason,
+            knnDistance: mlResult.knnDistance,
+            classifierConfidence: mlResult.classifierConfidence,
+          })).pipe(
+            filter(r => r !== null),
+            map(r => ({
+              containsWomen: r.containsWomen,
+              reason: "haiku",
+              priority: PRIORITY.HAIKU,
+              raw: r.raw,
+            })),
+            catchError(() => EMPTY),
+          );
+        }),
+      );
+      sources.push(haiku$);
+    }
+  }
+
+  // Merge all sources — emit each result as it arrives.
+  // Priority resolution happens in the subscriber.
+  return merge(...sources);
+}
+
+// The main entry point for classification. Returns a Promise that resolves
+// with the first result, but the pipeline continues running — later results
+// (server, Haiku) notify tabs via classificationOverride messages.
+function classifyImage(url, imageDataUrl) {
+  // Instant cache hit — no pipeline needed
+  if (cloudCache[url]) {
+    return Promise.resolve({
+      containsWomen: cloudCache[url].containsWomen,
+      reason: "cloud-cache",
+    });
+  }
+
+  // Deduplication: if this URL is already being classified, wait for its first result
+  if (inFlightClassifications.has(url)) {
+    const existing = inFlightClassifications.get(url);
+    return new Promise(resolve => {
+      const sub = existing.subject.subscribe(result => {
+        resolve(result);
+        sub.unsubscribe();
+      });
+    });
+  }
+
+  // Create a ReplaySubject so late subscribers (dedup) get the latest result
+  const resultSubject = new ReplaySubject(1);
+  let bestResult = null;   // highest-priority result seen so far
+  let mlDescriptors = null; // saved from ML result for learning
+  let firstResolve = null;
+  const firstResultPromise = new Promise(resolve => { firstResolve = resolve; });
+
+  const pipeline$ = createClassificationPipeline(url, imageDataUrl);
+
+  const subscription = pipeline$.subscribe({
+    next(result) {
+      // Save ML descriptors for later learning
+      if (result.priority === PRIORITY.ML && result.descriptors) {
+        mlDescriptors = result.descriptors;
+      }
+
+      // Priority resolution: ignore results from lower-priority sources
+      // that arrive after a higher-priority source already answered
+      if (bestResult && result.priority < bestResult.priority) return;
+
+      const isFirst = !bestResult;
+      const changed = bestResult && result.containsWomen !== bestResult.containsWomen;
+      bestResult = result;
+
+      // Cache every accepted result
+      cloudCache[url] = { containsWomen: result.containsWomen, timestamp: Date.now() };
+      resultSubject.next(result);
+
+      if (isFirst) {
+        // First accepted emission — resolve the Promise returned to content.js
+        firstResolve(result);
+      } else if (changed) {
+        // Higher-priority source disagrees — notify tabs to update the DOM
+        console.log("[SE] Override:", result.reason, "says", result.containsWomen ? "block" : "safe",
+          "for", url.substring(0, 60));
+        notifyTabs(url, result.containsWomen, result.reason);
+      }
+
+      // Haiku-specific side effects (whether it agrees or disagrees)
+      if (result.priority === PRIORITY.HAIKU) {
+        if (mlDescriptors && mlDescriptors.length > 0) {
+          feedHaikuIntoLearning(url, { containsWomen: result.containsWomen }, mlDescriptors);
+        }
+        if (serverEnabled && serverToken) {
+          hashUrl(url).then(hash => {
+            serverSubmitClassification(hash, result.containsWomen, "haiku", 0.95);
+          }).catch(() => {});
+        }
+      }
+    },
+    complete() {
+      inFlightClassifications.delete(url);
+      resultSubject.complete();
+      if (!bestResult) firstResolve({ containsWomen: true, reason: "no-sources" });
+    },
+    error(err) {
+      console.error("[SE] Pipeline error:", err);
+      inFlightClassifications.delete(url);
+      resultSubject.complete();
+      if (!bestResult) firstResolve({ containsWomen: true, reason: "error" });
+    },
+  });
+
+  inFlightClassifications.set(url, { subject: resultSubject, subscription });
+
+  return firstResultPromise;
+}
+
+async function runMLDetection(url, imageDataUrl) {
+  await modelsReadyPromise;
+  if (!modelsLoaded) {
+    return { containsWomen: true, reason: "models-not-loaded" };
+  }
+
+  let imageData;
+  try {
+    imageData = await dataUrlToImageData(imageDataUrl);
+  } catch (err) {
+    console.warn("[SE] Failed to decode image:", url.substring(0, 60), err.message);
+    return { containsWomen: true, reason: "decode-error" };
+  }
+
+  const hasLearning = knownFaces.length > 0 || knownSafeFaces.length > 0 || classifierWeights !== null;
+
+  const faceTensor = imageDataToTensor(imageData);
+  const personTensor = personDetector ? imageDataToTensor(imageData) : null;
+
+  let faceDetectionPromise;
+  if (hasLearning) {
+    faceDetectionPromise = faceapi
+      .detectAllFaces(faceTensor, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptors()
+      .withAgeAndGender();
+  } else {
+    faceDetectionPromise = faceapi
+      .detectAllFaces(faceTensor, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }))
+      .withAgeAndGender();
+  }
+
+  const personDetectionPromise = personTensor
+    ? runPersonDetection(personTensor)
+    : Promise.resolve([]);
+
+  const DETECT_TIMEOUT = 60_000;
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("detection_timeout")), DETECT_TIMEOUT)
+  );
+
+  const t0 = performance.now();
+  let detections, persons;
+  try {
+    [detections, persons] = await Promise.race([
+      Promise.all([faceDetectionPromise, personDetectionPromise]),
+      timeoutPromise,
+    ]);
+  } finally {
+    faceTensor.dispose();
+    if (personTensor) personTensor.dispose();
+  }
+
+  const t1 = performance.now();
+  console.log("[SE] Detection:", Math.round(t1 - t0), "ms, faces:", detections ? detections.length : 0,
+    "persons:", persons ? persons.length : 0, "src:", url.substring(0, 80));
+
+  let containsWomen = false;
+  let reason = "";
+  let descriptors = [];
+
+  if (detections && detections.length > 0) {
+    for (const det of detections) {
+      let flagBlock = false;
+      let flagSafe = false;
+
+      if (det.gender === "female" && det.genderProbability > 0.6) {
+        flagBlock = true;
+      }
+
+      if (hasLearning && det.descriptor) {
+        const descriptor = Array.from(det.descriptor);
+        descriptors.push(descriptor);
+        if (matchesKnownBlockedFace(descriptor)) flagBlock = true;
+        if (matchesKnownSafeFace(descriptor)) flagSafe = true;
+        if (classifierWeights && classifyDescriptor(descriptor) > 0.5) flagBlock = true;
+      }
+
+      if (flagBlock && !flagSafe) {
+        containsWomen = true;
+        reason = "face";
+        break;
+      }
+    }
+  } else if (persons && persons.length > 0) {
+    containsWomen = true;
+    reason = "person-no-face";
+  }
+
+  return {
+    containsWomen,
+    reason,
+    faceCount: detections ? detections.length : 0,
+    personCount: persons ? persons.length : 0,
+    descriptors,
+  };
+}
+
+async function extractDescriptorsFromDataUrl(imageDataUrl) {
+  await modelsReadyPromise;
+  if (!modelsLoaded) return [];
+  try {
+    const imageData = await dataUrlToImageData(imageDataUrl);
+    const tensor = imageDataToTensor(imageData);
+    let detections;
+    try {
+      detections = await faceapi
+        .detectAllFaces(tensor, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 }))
+        .withFaceLandmarks(true)
+        .withFaceDescriptors();
+    } finally {
+      tensor.dispose();
+    }
+    return detections.map(d => Array.from(d.descriptor));
+  } catch (err) {
+    console.error("[SE] Descriptor extraction error:", err);
+    return [];
+  }
 }
 
 // --- Domain helpers ---
@@ -286,43 +801,20 @@ async function rateLimitedHaikuCall(imageDataUrl) {
 }
 
 // Process a cloud classification request. Deduplicates by URL.
+// Called from the RxJS pipeline — server check is handled separately there.
 async function handleCloudClassify(imageUrl, imageDataUrl, localResult) {
-  // 1. Check cloud cache — never send the same URL twice
+  // Check cloud cache — never send the same URL twice
   if (cloudCache[imageUrl]) {
     cloudSavedCount++;
     return { ...cloudCache[imageUrl], source: "cloud-cache" };
   }
 
-  // 2. Check if this URL is already in-flight
+  // Check if this URL is already in-flight
   if (inFlightUrls.has(imageUrl)) {
     return inFlightUrls.get(imageUrl);
   }
 
-  // 3. Check shared server — if another user already classified this hash, skip Haiku
-  if (serverEnabled && serverToken) {
-    try {
-      const hash = await hashUrl(imageUrl);
-      const data = await serverFetch("/api/classifications/batch", {
-        method: "POST",
-        body: JSON.stringify({ hashes: [hash] }),
-      });
-      if (data && data.results && data.results[hash]) {
-        const sv = data.results[hash];
-        const result = { containsWomen: sv.containsWomen, source: "server" };
-        cloudCache[imageUrl] = { containsWomen: sv.containsWomen, timestamp: Date.now() };
-        cloudSavedCount++;
-        saveState();
-        return result;
-      }
-    } catch { /* server unreachable — fall through to Haiku */ }
-  }
-
-  // 4. Check if cloud is disabled
-  if (cloudMode === "never" || !anthropicApiKey) {
-    return null;
-  }
-
-  // 4. In "uncertain" mode, skip if local is confident
+  // In "uncertain" mode, skip if local is confident
   if (cloudMode === "uncertain" && localResult) {
     if (localResult.source === "user") return null;
     if (localResult.knnDistance !== undefined && localResult.knnDistance < 0.3) {
@@ -335,7 +827,7 @@ async function handleCloudClassify(imageUrl, imageDataUrl, localResult) {
     }
   }
 
-  // 5. Call Haiku API (rate-limited, deduplicated via in-flight map)
+  // Call Haiku API (rate-limited, deduplicated via in-flight map)
   const promise = (async () => {
     const haikuResult = await rateLimitedHaikuCall(imageDataUrl);
     if (!haikuResult) return null;
@@ -679,12 +1171,6 @@ browser.runtime.onMessage.addListener((msg, sender) => {
         whitelisted,
         manualBlocklist,
         manualSafelist,
-        knownFaces,
-        knownSafeFaces,
-        classifierWeights,
-        cloudCache,
-        cloudMode,
-        hasApiKey: !!anthropicApiKey,
         serverEnabled,
       });
     }
@@ -693,16 +1179,44 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return fetchImageAsDataUrl(msg.url);
     }
 
+    case "checkCache": {
+      // Fast cache check — no pixel data needed
+      const url = msg.url;
+      if (cloudCache[url]) {
+        return Promise.resolve({
+          hit: true,
+          containsWomen: cloudCache[url].containsWomen,
+          reason: "cloud-cache",
+        });
+      }
+      return Promise.resolve({ hit: false });
+    }
+
+    case "classifyImage": {
+      // Full RxJS pipeline: cache + server + ML + Haiku in parallel
+      const { url: imgUrl, imageDataUrl: imgData } = msg;
+      return classifyImage(imgUrl, imgData);
+    }
+
+    case "extractDescriptors": {
+      return extractDescriptorsFromDataUrl(msg.imageDataUrl);
+    }
+
     case "getStats": {
       return browser.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+        let contentStats = { scanned: 0, hidden: 0 };
         if (tab) {
           try {
-            return await browser.tabs.sendMessage(tab.id, { type: "getStats" });
-          } catch {
-            return { scanned: 0, hidden: 0 };
-          }
+            contentStats = await browser.tabs.sendMessage(tab.id, { type: "getStats" });
+          } catch { /* tab may not have content script */ }
         }
-        return { scanned: 0, hidden: 0 };
+        // Merge ML status from background
+        return {
+          ...contentStats,
+          backend: mlBackend,
+          modelsLoaded,
+          personDetectorLoaded: personDetector !== null,
+        };
       });
     }
 

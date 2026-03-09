@@ -1,13 +1,11 @@
 /* Images start hidden until analyzed */
 .shmirat-eynaim-pending {
   opacity: 0 !important;
-  transition: opacity 0.2s ease-in-out;
 }
 
-/* Images confirmed safe fade in */
+/* Images confirmed safe — no transition, instant reveal */
 .shmirat-eynaim-safe {
   opacity: 1 !important;
-  transition: opacity 0.2s ease-in-out;
 }
 
 /* Images containing women are fully hidden */
