@@ -163,6 +163,34 @@ Submit a face descriptor from the local learning system.
 { "success": true }
 ```
 
+### POST /api/register
+
+Self-registration endpoint. Creates a new user (auto-approved) and returns an API token. If the email already exists, returns the existing token.
+
+No authentication required.
+
+**Headers:** `Content-Type: application/json`
+
+**Body:**
+```json
+{
+  "email": "ext-a3f1b2c4d5e6..."
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| email | string | yes | Unique identifier (extension uses a generated device ID) |
+
+**Response (200):**
+```json
+{
+  "token": "4fd1ff7a95a9a20e534c3f070021307cde742985e3220c95101033270b2920cf"
+}
+```
+
+The extension calls this automatically on first startup. The token is persisted in `browser.storage.local` and reused across sessions.
+
 ## Error Responses
 
 All errors follow the same format:

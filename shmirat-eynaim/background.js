@@ -26,12 +26,20 @@ let cloudCallsToday = 0;
 let cloudCallsDate = "";  // "YYYY-MM-DD"
 let cloudSavedCount = 0;  // images handled locally that would have gone to cloud
 
+// --- Shared server state ---
+
+const SERVER_URL = "https://feb-hill-provincial-verbal.trycloudflare.com";
+let serverToken = "";   // 64-char hex API token, auto-generated
+let serverEnabled = false;
+let serverDeviceId = ""; // unique per-install identifier used as "email" for registration
+
 // --- State management ---
 
 async function loadState() {
   const data = await browser.storage.local.get([
     "blockingEnabled", "whitelist", "anthropicApiKey", "cloudMode",
     "cloudCache", "cloudCallsToday", "cloudCallsDate", "cloudSavedCount",
+    "serverToken", "serverEnabled", "serverDeviceId",
   ]);
   if (data.blockingEnabled !== undefined) blockingEnabled = data.blockingEnabled;
   if (data.whitelist) whitelist = data.whitelist;
@@ -41,6 +49,9 @@ async function loadState() {
   if (data.cloudCallsToday !== undefined) cloudCallsToday = data.cloudCallsToday;
   if (data.cloudCallsDate) cloudCallsDate = data.cloudCallsDate;
   if (data.cloudSavedCount !== undefined) cloudSavedCount = data.cloudSavedCount;
+  if (data.serverToken) serverToken = data.serverToken;
+  if (data.serverEnabled !== undefined) serverEnabled = data.serverEnabled;
+  if (data.serverDeviceId) serverDeviceId = data.serverDeviceId;
 
   // Reset daily counter if date changed
   const today = new Date().toISOString().slice(0, 10);
@@ -55,6 +66,7 @@ async function saveState() {
   await browser.storage.local.set({
     blockingEnabled, whitelist, anthropicApiKey, cloudMode,
     cloudCache, cloudCallsToday, cloudCallsDate, cloudSavedCount,
+    serverToken, serverEnabled, serverDeviceId,
   });
 }
 
@@ -363,6 +375,143 @@ function feedHaikuIntoLearning(imageUrl, haikuResult, descriptors) {
   saveLearningData();
 }
 
+// --- Shared server API ---
+
+// Simple hash: SHA-256 of the URL, truncated to 16 hex chars.
+// Used as a lightweight "perceptual hash" stand-in for server lookups.
+async function hashUrl(url) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(url);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("").substring(0, 16);
+}
+
+async function serverFetch(endpoint, options = {}) {
+  if (!serverEnabled || !serverToken) return null;
+  const url = SERVER_URL + endpoint;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Authorization": `Bearer ${serverToken}`,
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.warn("[Shmirat Eynaim] Server error:", res.status, endpoint);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    console.warn("[Shmirat Eynaim] Server fetch failed:", err.message);
+    return null;
+  }
+}
+
+// Look up multiple hashes from the shared server
+async function serverBatchLookup(urlHashes) {
+  // urlHashes: [{url, hash}]
+  if (urlHashes.length === 0) return {};
+  const hashes = urlHashes.map(h => h.hash);
+  const data = await serverFetch("/api/classifications/batch", {
+    method: "POST",
+    body: JSON.stringify({ hashes }),
+  });
+  if (!data || !data.results) return {};
+  // Map hashes back to URLs
+  const result = {};
+  for (const { url, hash } of urlHashes) {
+    if (data.results[hash]) {
+      result[url] = data.results[hash];
+    }
+  }
+  return result;
+}
+
+// Submit a classification to the shared server
+async function serverSubmitClassification(hash, containsWomen, source, confidence) {
+  return serverFetch("/api/classifications", {
+    method: "POST",
+    body: JSON.stringify({
+      hash,
+      containsWomen,
+      source,
+      confidence: confidence || 0.8,
+    }),
+  });
+}
+
+// Submit a face descriptor to the shared server
+async function serverSubmitDescriptor(descriptor, label, confidence) {
+  // descriptor is a number[128], encode as base64 float32 array
+  const buffer = new Float32Array(descriptor).buffer;
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+  return serverFetch("/api/descriptors", {
+    method: "POST",
+    body: JSON.stringify({ descriptor: base64, label, confidence }),
+  });
+}
+
+// Auto-register with the shared server. Generates a device ID on first run,
+// calls POST /api/register, and stores the returned token.
+async function serverAutoRegister() {
+  // Generate a stable device ID if we don't have one
+  if (!serverDeviceId) {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    serverDeviceId = "ext-" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    await saveState();
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(SERVER_URL + "/api/register", {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: serverDeviceId }),
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.warn("[Shmirat Eynaim] Server registration failed:", res.status);
+      return false;
+    }
+    const data = await res.json();
+    if (data.token) {
+      serverToken = data.token;
+      serverEnabled = true;
+      await saveState();
+      console.log("[Shmirat Eynaim] Auto-registered with server");
+      return true;
+    }
+  } catch (err) {
+    clearTimeout(timeout);
+    console.warn("[Shmirat Eynaim] Server registration error:", err.message);
+  }
+  return false;
+}
+
+// Verify server connection by calling GET /api/stats (no auth required)
+async function serverVerifyConnection() {
+  const url = SERVER_URL + "/api/stats";
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    const data = await res.json();
+    return { ok: true, stats: data };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 // --- Badge / icon updates ---
 
 function updateBadge() {
@@ -517,6 +666,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
         cloudCache,
         cloudMode,
         hasApiKey: !!anthropicApiKey,
+        serverEnabled,
       });
     }
 
@@ -627,6 +777,43 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       });
     }
 
+    case "getServerConfig": {
+      return Promise.resolve({
+        serverUrl: SERVER_URL,
+        hasToken: !!serverToken,
+        serverEnabled,
+      });
+    }
+
+    case "verifyServer": {
+      return serverVerifyConnection();
+    }
+
+    case "serverBatchLookup": {
+      // msg.urls: string[]
+      const urls = msg.urls || [];
+      return (async () => {
+        const urlHashes = await Promise.all(
+          urls.map(async (url) => ({ url, hash: await hashUrl(url) }))
+        );
+        return serverBatchLookup(urlHashes);
+      })();
+    }
+
+    case "serverSubmitClassification": {
+      const { url: classUrl, containsWomen: cw, source: src, confidence: conf } = msg;
+      return (async () => {
+        const hash = await hashUrl(classUrl);
+        await serverSubmitClassification(hash, cw, src, conf);
+        return { success: true };
+      })();
+    }
+
+    case "serverSubmitDescriptor": {
+      const { descriptor: desc, label: lbl, confidence: dConf } = msg;
+      return serverSubmitDescriptor(desc, lbl, dConf);
+    }
+
     case "getLearningStats": {
       return Promise.resolve({
         knownFacesCount: knownFaces.length,
@@ -701,6 +888,14 @@ try {
     await loadState();
     await loadLearningData();
     updateBadge();
+    // Auto-register with the shared server if we don't have a token yet
+    if (!serverToken) {
+      serverAutoRegister().catch(err => {
+        console.warn("[Shmirat Eynaim] Auto-register failed:", err.message);
+      });
+    } else {
+      serverEnabled = true;
+    }
     console.log("[Shmirat Eynaim] Background script initialized");
   } catch (err) {
     console.error("[Shmirat Eynaim] Init error:", err);

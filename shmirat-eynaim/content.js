@@ -67,6 +67,10 @@
   const cloudMode = state.cloudMode || "all";
   const hasApiKey = state.hasApiKey || false;
 
+  // Shared server state
+  const serverEnabled = state.serverEnabled || false;
+  const serverCache = {}; // { [url]: { containsWomen, confidence, voteBlock, voteSafe } }
+
   // --- ML model loading ---
 
   let modelsLoaded = false;
@@ -447,6 +451,51 @@
     else if (reason === "face") hiddenFaceCount++;
   }
 
+  // --- Shared server helpers ---
+
+  // Batch lookup URLs from the shared server, populates serverCache
+  async function serverBatchLookup(urls) {
+    if (!serverEnabled || urls.length === 0) return;
+    try {
+      const results = await browser.runtime.sendMessage({
+        type: "serverBatchLookup",
+        urls,
+      });
+      if (results) {
+        for (const [url, data] of Object.entries(results)) {
+          serverCache[url] = data;
+        }
+      }
+    } catch (err) {
+      console.warn("[SE] Server batch lookup error:", err.message);
+    }
+  }
+
+  // Submit a classification result to the shared server (non-blocking)
+  function serverSubmitClassification(url, containsWomen, source, confidence) {
+    if (!serverEnabled) return;
+    browser.runtime.sendMessage({
+      type: "serverSubmitClassification",
+      url,
+      containsWomen,
+      source,
+      confidence,
+    }).catch(() => {});
+  }
+
+  // Submit face descriptors to the shared server (non-blocking)
+  function serverSubmitDescriptors(descriptors, label, confidence) {
+    if (!serverEnabled) return;
+    for (const desc of descriptors) {
+      browser.runtime.sendMessage({
+        type: "serverSubmitDescriptor",
+        descriptor: desc,
+        label,
+        confidence,
+      }).catch(() => {});
+    }
+  }
+
   // --- Cloud classification helper ---
 
   async function requestCloudClassify(src, canvas, localResult) {
@@ -513,6 +562,20 @@
       return;
     }
 
+    // Check shared server cache (populated by batch lookup)
+    if (serverCache[src]) {
+      const sv = serverCache[src];
+      const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
+      // Trust server result if it has at least 2 votes
+      if (totalVotes >= 2) {
+        const result = { containsWomen: sv.containsWomen, reason: "server" };
+        urlCache.set(src, result);
+        scannedCount++;
+        if (result.containsWomen) markBlocked(el, "server"); else markSafe(el);
+        return;
+      }
+    }
+
     await modelsReadyPromise;
     if (!modelsLoaded) { markBlocked(el); scannedCount++; return; }
 
@@ -526,6 +589,9 @@
       urlCache.set(src, localResult);
       scannedCount++;
       if (localResult.containsWomen) markBlocked(el, localResult.reason); else markSafe(el);
+
+      // Submit classification to shared server (non-blocking)
+      serverSubmitClassification(src, localResult.containsWomen, localResult.reason || "local", 0.8);
 
       // Fire off cloud classification in the background (non-blocking)
       // Cloud result will update cache and learning system for future images
@@ -584,18 +650,43 @@
 
   function discoverImages(root) {
     if (!root || !root.querySelectorAll) return;
+
+    // Collect URLs for server batch lookup
+    const newUrls = [];
+    const pendingElements = [];
+
     for (const img of root.querySelectorAll("img")) {
-      if (markPending(img)) processImage(img);
+      if (markPending(img)) {
+        pendingElements.push(img);
+        const src = getImageSrc(img);
+        if (src && !urlCache.has(src) && !cloudCache[src] && !serverCache[src]) newUrls.push(src);
+      }
     }
     for (const el of root.querySelectorAll("*")) {
       if (el.tagName === "IMG") continue;
       const bg = getComputedStyle(el).backgroundImage;
       if (bg && bg !== "none" && bg.includes("url(")) {
-        if (markPending(el)) processImage(el);
+        if (markPending(el)) {
+          pendingElements.push(el);
+          const src = getImageSrc(el);
+          if (src && !urlCache.has(src) && !cloudCache[src] && !serverCache[src]) newUrls.push(src);
+        }
       }
     }
     for (const video of root.querySelectorAll("video[poster]")) {
-      if (markPending(video)) processImage(video);
+      if (markPending(video)) {
+        pendingElements.push(video);
+        const src = getImageSrc(video);
+        if (src && !urlCache.has(src) && !cloudCache[src] && !serverCache[src]) newUrls.push(src);
+      }
+    }
+
+    // Process images immediately — don't wait for server
+    for (const el of pendingElements) processImage(el);
+
+    // Fire server batch lookup in background for future cache hits
+    if (serverEnabled && newUrls.length > 0) {
+      serverBatchLookup(newUrls).catch(() => {});
     }
   }
 
@@ -682,9 +773,12 @@
         const descriptors = await extractDescriptors(canvas);
         if (descriptors.length > 0) {
           browser.runtime.sendMessage({ type: "learnBlock", url, descriptors }).catch(() => {});
+          serverSubmitDescriptors(descriptors, "block", 1.0);
         }
       }
     }
+    // Also submit to shared server
+    serverSubmitClassification(url, true, "user", 1.0);
   }
 
   async function safeAndLearn(url) {
@@ -700,9 +794,12 @@
         const descriptors = await extractDescriptors(canvas);
         if (descriptors.length > 0) {
           browser.runtime.sendMessage({ type: "learnSafe", url, descriptors }).catch(() => {});
+          serverSubmitDescriptors(descriptors, "safe", 1.0);
         }
       }
     }
+    // Also submit to shared server
+    serverSubmitClassification(url, false, "user", 1.0);
   }
 
   // --- Listen for messages ---

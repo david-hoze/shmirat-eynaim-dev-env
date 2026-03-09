@@ -209,6 +209,31 @@ h2 {
   background: #6a3a3e;
 }
 
+/* Shared server section */
+.server-row {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #2a2a3e;
+  border-radius: 8px;
+}
+
+.server-row h2 {
+  margin-bottom: 6px;
+}
+
+.server-status {
+  font-size: 11px;
+  color: #a0a0c0;
+}
+
+.server-status.connected {
+  color: #2ecc71;
+}
+
+.server-status.error {
+  color: #e74c3c;
+}
+
 /* Cloud API section */
 .cloud-row {
   margin-bottom: 14px;

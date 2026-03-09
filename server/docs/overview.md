@@ -40,4 +40,6 @@ The server sits alongside — not in place of — the extension's existing class
 
 **Graceful degradation.** The extension works fully without the server. The server is purely additive — if it's down, unreachable, or the user has no account, everything falls back to local ML + Haiku.
 
+**Zero configuration.** Users don't need to create accounts or enter tokens. The extension auto-registers with the server on first startup, receiving a token that is persisted locally. The server URL is hardcoded in the extension.
+
 **Cost reduction.** The primary economic benefit is reducing Claude Haiku API calls. If 100 users browse similar sites, only the first user pays for Haiku classification of each image. The other 99 get the result from the shared cache for free.

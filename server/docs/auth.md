@@ -12,6 +12,22 @@ Tokens are 256-bit cryptographically random values, hex-encoded to 64 characters
 
 ## User lifecycle
 
+### Automatic (extension self-registration)
+
+```
+1. Extension starts for the first time (no stored token)
+2. Extension generates a unique device ID (e.g., "ext-a3f1b2c4...")
+3. Extension calls POST /api/register with the device ID
+   → Server creates user with status: APPROVED
+   → Returns token
+4. Extension stores token in browser.storage.local
+5. All subsequent API calls use this token automatically
+```
+
+Self-registered users are auto-approved. No admin action needed.
+
+### Manual (admin CLI)
+
 ```
 1. Admin runs:  shmirat-server add-user alice@example.com
    → User created with status: NOT APPROVED
@@ -21,14 +37,12 @@ Tokens are 256-bit cryptographically random values, hex-encoded to 64 characters
    → User status: APPROVED
    → Token now works for API requests
 
-3. User configures token in extension popup settings
-
-4. (Optional) Admin runs:  shmirat-server revoke alice@example.com
+3. (Optional) Admin runs:  shmirat-server revoke alice@example.com
    → User status: NOT APPROVED
    → Token immediately stops working
 ```
 
-Users cannot self-register. An admin must create and approve each user.
+Admin-created users are NOT approved by default and must be explicitly approved.
 
 ## Token validation
 

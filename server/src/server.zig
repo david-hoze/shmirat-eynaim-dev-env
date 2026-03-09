@@ -106,6 +106,8 @@ fn handleConnection(
         try handlers.handleGetDescriptors(allocator, database, &request);
     } else if (method == .POST and std.mem.eql(u8, path, "/api/descriptors")) {
         try handlers.handlePostDescriptor(allocator, database, &request, body);
+    } else if (method == .POST and std.mem.eql(u8, path, "/api/register")) {
+        try handlers.handleRegister(allocator, database, &request, body);
     } else {
         try handlers.handleNotFound(&request);
     }

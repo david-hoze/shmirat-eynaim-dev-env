@@ -99,8 +99,11 @@ server {
 
 ## Extension-side setup
 
-Users configure the server connection in the extension popup:
+The extension connects to the server automatically — no user configuration needed.
 
-1. Enter the server URL (e.g., `https://shmirat.example.com`)
-2. Paste the API token provided by the admin
-3. The extension verifies the connection by calling `GET /api/stats`
+1. The server URL is hardcoded in the extension (`SERVER_URL` constant in `background.js`)
+2. On first startup, the extension self-registers via `POST /api/register` and receives a token
+3. The token is persisted in `browser.storage.local` and reused across sessions
+4. The popup shows "Connected" or "Not connected" status under the "Shared Server" section
+
+To point the extension at a different server, update the `SERVER_URL` constant in `background.js`.

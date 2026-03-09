@@ -16,6 +16,7 @@ const apiKeyInput = document.getElementById("api-key");
 const saveKeyBtn = document.getElementById("save-key-btn");
 const cloudStatsEl = document.getElementById("cloud-stats");
 const cloudModeRadios = document.querySelectorAll('input[name="cloud-mode"]');
+const serverStatusEl = document.getElementById("server-status");
 
 let currentDomain = "";
 let currentState = {};
@@ -101,6 +102,22 @@ async function updateLearningStats() {
   }
 }
 
+async function updateServerStatus() {
+  try {
+    const config = await browser.runtime.sendMessage({ type: "getServerConfig" });
+    if (config.serverEnabled) {
+      serverStatusEl.textContent = "Connected";
+      serverStatusEl.className = "server-status connected";
+    } else {
+      serverStatusEl.textContent = "Not connected.";
+      serverStatusEl.className = "server-status";
+    }
+  } catch {
+    serverStatusEl.textContent = "Not connected.";
+    serverStatusEl.className = "server-status";
+  }
+}
+
 async function updateCloudStats() {
   try {
     const stats = await browser.runtime.sendMessage({ type: "getCloudStats" });
@@ -126,6 +143,7 @@ function render() {
   updateStats();
   updateLearningStats();
   updateCloudStats();
+  updateServerStatus();
 }
 
 // Init

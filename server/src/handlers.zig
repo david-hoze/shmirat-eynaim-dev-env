@@ -429,6 +429,72 @@ pub fn handlePostDescriptor(allocator: std.mem.Allocator, database: *db_mod.Data
 }
 
 // -----------------------------------------------------------------------
+// POST /api/register — Self-registration, returns a new token
+// -----------------------------------------------------------------------
+
+pub fn handleRegister(allocator: std.mem.Allocator, database: *db_mod.Database, request: *std.http.Server.Request, body: ?[]const u8) !void {
+    std.log.info("POST /api/register", .{});
+
+    const request_body = body orelse {
+        try sendError(request, .bad_request, "missing request body");
+        return;
+    };
+
+    const parsed = std.json.parseFromSlice(RegisterRequest, allocator, request_body, .{
+        .ignore_unknown_fields = true,
+    }) catch {
+        try sendError(request, .bad_request, "invalid JSON");
+        return;
+    };
+    defer parsed.deinit();
+    const req = parsed.value;
+
+    if (req.email.len == 0) {
+        try sendError(request, .bad_request, "email is required");
+        return;
+    }
+
+    // Check if user already exists
+    var check_stmt = try database.prepare("SELECT token FROM users WHERE email = ?1");
+    defer check_stmt.deinit();
+    try check_stmt.bindText(1, req.email);
+
+    if (try check_stmt.step()) {
+        // User exists — return their existing token
+        const existing_token = check_stmt.columnText(0) orelse "";
+        var buf = std.ArrayList(u8).init(allocator);
+        defer buf.deinit();
+        try std.fmt.format(buf.writer(),
+            \\{{"token":"{s}"}}
+        , .{existing_token});
+        try sendResponse(request, .ok, buf.items);
+        return;
+    }
+
+    // Generate token and create user (auto-approved)
+    const token = auth_mod.generateToken();
+
+    var stmt = try database.prepare(
+        "INSERT INTO users (email, token, approved) VALUES (?1, ?2, 1)",
+    );
+    defer stmt.deinit();
+
+    try stmt.bindText(1, req.email);
+    try stmt.bindText(2, &token);
+    _ = try stmt.step();
+
+    std.log.info("User self-registered: {s}", .{req.email});
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    try std.fmt.format(buf.writer(),
+        \\{{"token":"{s}"}}
+    , .{token});
+
+    try sendResponse(request, .ok, buf.items);
+}
+
+// -----------------------------------------------------------------------
 // CORS preflight handler
 // -----------------------------------------------------------------------
 
@@ -471,6 +537,10 @@ const DescriptorRequest = struct {
     descriptor: []const u8, // base64-encoded
     label: []const u8, // "block" or "safe"
     confidence: f64,
+};
+
+const RegisterRequest = struct {
+    email: []const u8,
 };
 
 // -----------------------------------------------------------------------
