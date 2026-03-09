@@ -299,13 +299,47 @@ async function runPersonDetection(tensorInput) {
 //   3 = haiku (Claude API — most trusted)
 //   4 = user manual (explicit block/safe — absolute override)
 
-const { ReplaySubject, merge, from, of, EMPTY } = rxjs;
-const { filter, map, scan, distinctUntilChanged, tap, catchError } = rxjs.operators;
+const { Subject, ReplaySubject, merge, from, of, EMPTY } = rxjs;
+const { filter, map, scan, distinctUntilChanged, tap, catchError, bufferTime, mergeMap } = rxjs.operators;
 
 const PRIORITY = { CACHE: 0, ML: 1, SERVER: 2, HAIKU: 3, USER: 4 };
 
 // In-flight deduplication: url → { subject, subscription }
 const inFlightClassifications = new Map();
+
+// --- Batched server lookups ---
+// Individual pipelines push {url, resolve} into this subject.
+// bufferTime collects them, one HTTP batch call goes out, results fan back.
+const serverLookupSubject = new Subject();
+
+serverLookupSubject.pipe(
+  bufferTime(50, null, 50), // flush every 50ms or 50 items
+  filter(batch => batch.length > 0),
+  mergeMap(async (batch) => {
+    try {
+      // Hash all URLs
+      const urlHashes = await Promise.all(
+        batch.map(async ({ url }) => ({ url, hash: await hashUrl(url) }))
+      );
+      const results = await serverBatchLookup(urlHashes);
+      // Fan results back to each waiting pipeline
+      for (const { url, resolve } of batch) {
+        const sv = results[url];
+        if (sv) {
+          const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
+          if (totalVotes >= 2) {
+            resolve({ containsWomen: sv.containsWomen, reason: "server", priority: PRIORITY.SERVER });
+            continue;
+          }
+        }
+        resolve(null); // no trusted result
+      }
+    } catch {
+      // Server unreachable — resolve all with null
+      for (const { resolve } of batch) resolve(null);
+    }
+  }),
+).subscribe();
 
 // Notify all tabs of a classification update
 function notifyTabs(url, containsWomen, reason) {
@@ -334,23 +368,11 @@ function createClassificationPipeline(url, imageDataUrl) {
     }));
   }
 
-  // Source 2: Server check (async network)
+  // Source 2: Server check (batched — multiple images share one HTTP call)
   if (serverEnabled && serverToken) {
-    const server$ = from((async () => {
-      const hash = await hashUrl(url);
-      const data = await serverFetch("/api/classifications/batch", {
-        method: "POST",
-        body: JSON.stringify({ hashes: [hash] }),
-      });
-      if (data && data.results && data.results[hash]) {
-        const sv = data.results[hash];
-        const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
-        if (totalVotes >= 2) {
-          return { containsWomen: sv.containsWomen, reason: "server", priority: PRIORITY.SERVER };
-        }
-      }
-      return null; // server doesn't have a trusted result
-    })()).pipe(
+    const server$ = from(new Promise(resolve => {
+      serverLookupSubject.next({ url, resolve });
+    })).pipe(
       filter(r => r !== null),
       catchError(() => EMPTY),
     );
