@@ -1,4 +1,4 @@
-# Shmirat Eynaim — Firefox Extension Development
+﻿# Shmirat Eynaim — Firefox Extension Development
 
 ## Project Overview
 
@@ -163,3 +163,29 @@ ALL of these must pass before signaling completion:
 - [ ] Performance acceptable on pages with 30+ images
 - [ ] All Playwright tests pass
 - [ ] Visual screenshots match expectations
+
+## Testing Popup Stats (Scanned/Hidden Counts)
+
+The popup can't be opened via Playwright toolbar clicks. Use these two approaches:
+
+### Approach A: Query stats via content script messaging
+In Playwright tests, after waiting for ML processing to finish, evaluate this in the page:
+```javascript
+const stats = await page.evaluate(async () => {
+  return browser.runtime.sendMessage({ type: "getStats" });
+});
+expect(stats.scanned).toBeGreaterThan(0);
+expect(stats.hidden).toBe(expectedHiddenCount);
+```
+
+### Approach B: Open the popup as a page
+1. After launching Firefox with the extension profile, read the extension UUID from the profile's `extensions.json` file
+2. Navigate to `moz-extension://{uuid}/popup/popup.html`
+3. Use Playwright to check the DOM: `await page.textContent('#stats')` should contain the correct scanned/hidden counts
+4. Also verify the toggle switch, domain display, and whitelist entries render correctly
+
+Use both approaches. Approach A verifies the data is correct. Approach B verifies the popup UI displays it correctly.
+
+## Multi-Agent Collaboration
+
+Read and follow the instructions in CLAUDE_COLLAB.md for multi-agent coordination.

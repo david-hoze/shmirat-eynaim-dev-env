@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test: Performance — 55 Images</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, 210px); gap: 12px; }
+    .grid img { width: 200px; height: 150px; object-fit: cover; border-radius: 8px; }
+    .timer-box {
+      position: sticky; top: 0; z-index: 100;
+      background: white; padding: 12px 16px; border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15); margin-bottom: 20px;
+    }
+    .timer-box h2 { margin: 0 0 8px 0; font-size: 16px; }
+    .timer-box .metric { font-family: monospace; font-size: 14px; margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>Performance Test Page (55 Images)</h1>
+  <p>Tests extension performance with 55 landscape/object images from picsum.photos.</p>
+
+  <div class="timer-box" id="timer-box">
+    <h2>Performance Metrics</h2>
+    <div class="metric" id="metric-status">Status: Waiting for extension...</div>
+    <div class="metric" id="metric-load">Page load time: measuring...</div>
+    <div class="metric" id="metric-process">Extension processing time: measuring...</div>
+    <div class="metric" id="metric-total">Total images: 55</div>
+    <div class="metric" id="metric-processed">Images processed: checking...</div>
+  </div>
+
+  <div class="grid">
+    <img src="https://picsum.photos/seed/img1/200/150" alt="img 1" data-test="perf">
+    <img src="https://picsum.photos/seed/img2/200/150" alt="img 2" data-test="perf">
+    <img src="https://picsum.photos/seed/img3/200/150" alt="img 3" data-test="perf">
+    <img src="https://picsum.photos/seed/img4/200/150" alt="img 4" data-test="perf">
+    <img src="https://picsum.photos/seed/img5/200/150" alt="img 5" data-test="perf">
+    <img src="https://picsum.photos/seed/img6/200/150" alt="img 6" data-test="perf">
+    <img src="https://picsum.photos/seed/img7/200/150" alt="img 7" data-test="perf">
+    <img src="https://picsum.photos/seed/img8/200/150" alt="img 8" data-test="perf">
+    <img src="https://picsum.photos/seed/img9/200/150" alt="img 9" data-test="perf">
+    <img src="https://picsum.photos/seed/img10/200/150" alt="img 10" data-test="perf">
+    <img src="https://picsum.photos/seed/img11/200/150" alt="img 11" data-test="perf">
+    <img src="https://picsum.photos/seed/img12/200/150" alt="img 12" data-test="perf">
+    <img src="https://picsum.photos/seed/img13/200/150" alt="img 13" data-test="perf">
+    <img src="https://picsum.photos/seed/img14/200/150" alt="img 14" data-test="perf">
+    <img src="https://picsum.photos/seed/img15/200/150" alt="img 15" data-test="perf">
+    <img src="https://picsum.photos/seed/img16/200/150" alt="img 16" data-test="perf">
+    <img src="https://picsum.photos/seed/img17/200/150" alt="img 17" data-test="perf">
+    <img src="https://picsum.photos/seed/img18/200/150" alt="img 18" data-test="perf">
+    <img src="https://picsum.photos/seed/img19/200/150" alt="img 19" data-test="perf">
+    <img src="https://picsum.photos/seed/img20/200/150" alt="img 20" data-test="perf">
+    <img src="https://picsum.photos/seed/img21/200/150" alt="img 21" data-test="perf">
+    <img src="https://picsum.photos/seed/img22/200/150" alt="img 22" data-test="perf">
+    <img src="https://picsum.photos/seed/img23/200/150" alt="img 23" data-test="perf">
+    <img src="https://picsum.photos/seed/img24/200/150" alt="img 24" data-test="perf">
+    <img src="https://picsum.photos/seed/img25/200/150" alt="img 25" data-test="perf">
+    <img src="https://picsum.photos/seed/img26/200/150" alt="img 26" data-test="perf">
+    <img src="https://picsum.photos/seed/img27/200/150" alt="img 27" data-test="perf">
+    <img src="https://picsum.photos/seed/img28/200/150" alt="img 28" data-test="perf">
+    <img src="https://picsum.photos/seed/img29/200/150" alt="img 29" data-test="perf">
+    <img src="https://picsum.photos/seed/img30/200/150" alt="img 30" data-test="perf">
+    <img src="https://picsum.photos/seed/img31/200/150" alt="img 31" data-test="perf">
+    <img src="https://picsum.photos/seed/img32/200/150" alt="img 32" data-test="perf">
+    <img src="https://picsum.photos/seed/img33/200/150" alt="img 33" data-test="perf">
+    <img src="https://picsum.photos/seed/img34/200/150" alt="img 34" data-test="perf">
+    <img src="https://picsum.photos/seed/img35/200/150" alt="img 35" data-test="perf">
+    <img src="https://picsum.photos/seed/img36/200/150" alt="img 36" data-test="perf">
+    <img src="https://picsum.photos/seed/img37/200/150" alt="img 37" data-test="perf">
+    <img src="https://picsum.photos/seed/img38/200/150" alt="img 38" data-test="perf">
+    <img src="https://picsum.photos/seed/img39/200/150" alt="img 39" data-test="perf">
+    <img src="https://picsum.photos/seed/img40/200/150" alt="img 40" data-test="perf">
+    <img src="https://picsum.photos/seed/img41/200/150" alt="img 41" data-test="perf">
+    <img src="https://picsum.photos/seed/img42/200/150" alt="img 42" data-test="perf">
+    <img src="https://picsum.photos/seed/img43/200/150" alt="img 43" data-test="perf">
+    <img src="https://picsum.photos/seed/img44/200/150" alt="img 44" data-test="perf">
+    <img src="https://picsum.photos/seed/img45/200/150" alt="img 45" data-test="perf">
+    <img src="https://picsum.photos/seed/img46/200/150" alt="img 46" data-test="perf">
+    <img src="https://picsum.photos/seed/img47/200/150" alt="img 47" data-test="perf">
+    <img src="https://picsum.photos/seed/img48/200/150" alt="img 48" data-test="perf">
+    <img src="https://picsum.photos/seed/img49/200/150" alt="img 49" data-test="perf">
+    <img src="https://picsum.photos/seed/img50/200/150" alt="img 50" data-test="perf">
+    <img src="https://picsum.photos/seed/img51/200/150" alt="img 51" data-test="perf">
+    <img src="https://picsum.photos/seed/img52/200/150" alt="img 52" data-test="perf">
+    <img src="https://picsum.photos/seed/img53/200/150" alt="img 53" data-test="perf">
+    <img src="https://picsum.photos/seed/img54/200/150" alt="img 54" data-test="perf">
+    <img src="https://picsum.photos/seed/img55/200/150" alt="img 55" data-test="perf">
+  </div>
+
+  <script>
+    const pageStart = performance.now();
+
+    // Record when all images finish loading
+    let imagesLoaded = 0;
+    const totalImages = document.querySelectorAll('img[data-test="perf"]').length;
+    let allImagesLoadedTime = null;
+
+    document.querySelectorAll('img[data-test="perf"]').forEach(img => {
+      const handler = () => {
+        imagesLoaded++;
+        if (imagesLoaded === totalImages) {
+          allImagesLoadedTime = performance.now();
+          document.getElementById('metric-load').textContent =
+            `Page load time: ${(allImagesLoadedTime - pageStart).toFixed(0)}ms (all ${totalImages} images loaded)`;
+        }
+      };
+      img.addEventListener('load', handler);
+      img.addEventListener('error', handler);
+    });
+
+    // Check extension processing at intervals
+    function checkProcessing() {
+      const imgs = document.querySelectorAll('img[data-test="perf"]');
+      let processed = 0;
+      imgs.forEach(img => {
+        // Check if the extension has added any class or attribute to mark it as processed
+        if (img.classList.contains('shmirat-eynaim-blocked') ||
+            img.classList.contains('shmirat-eynaim-safe') ||
+            img.dataset.shmiratProcessed ||
+            img.hasAttribute('data-shmirat-processed')) {
+          processed++;
+        }
+      });
+      return processed;
+    }
+
+    // Poll for extension processing completion
+    const pollStart = performance.now();
+    let processingDone = false;
+    const pollInterval = setInterval(() => {
+      const processed = checkProcessing();
+      document.getElementById('metric-processed').textContent =
+        `Images processed: ${processed}/${totalImages}`;
+
+      if (processed === totalImages && !processingDone) {
+        processingDone = true;
+        const elapsed = performance.now() - pageStart;
+        document.getElementById('metric-process').textContent =
+          `Extension processing time: ${elapsed.toFixed(0)}ms (all ${totalImages} images processed)`;
+        document.getElementById('metric-status').textContent =
+          `Status: Complete — all ${totalImages} images processed`;
+        document.getElementById('metric-status').style.color = '#27ae60';
+        clearInterval(pollInterval);
+      }
+    }, 500);
+
+    // Final report after 30 seconds regardless
+    setTimeout(() => {
+      clearInterval(pollInterval);
+      const processed = checkProcessing();
+      const elapsed = performance.now() - pageStart;
+
+      if (!processingDone) {
+        document.getElementById('metric-process').textContent =
+          `Extension processing time: ${elapsed.toFixed(0)}ms elapsed (timeout — ${processed}/${totalImages} processed)`;
+        document.getElementById('metric-status').textContent =
+          processed === 0
+            ? 'Status: Extension may not be active (0 images processed after 30s)'
+            : `Status: Timeout — ${processed}/${totalImages} images processed in 30s`;
+        document.getElementById('metric-status').style.color = processed === 0 ? '#e74c3c' : '#f39c12';
+      }
+
+      document.getElementById('metric-processed').textContent =
+        `Images processed: ${processed}/${totalImages}`;
+
+      // Log detailed timing to console
+      console.log('=== Performance Test Results ===');
+      console.log(`Total images: ${totalImages}`);
+      console.log(`Images processed: ${processed}`);
+      console.log(`Total elapsed: ${elapsed.toFixed(0)}ms`);
+      if (allImagesLoadedTime) {
+        console.log(`All images loaded at: ${(allImagesLoadedTime - pageStart).toFixed(0)}ms`);
+      }
+    }, 30000);
+  </script>
+</body>
+</html>

@@ -72,8 +72,21 @@
       return true;
     }
 
+    // Skip small data URI images (icons, pixels, placeholders)
+    if (src.startsWith("data:image/")) {
+      // Data URIs under ~5KB are almost certainly icons/placeholders, not photos
+      if (src.length < 5000) return true;
+    }
+
     // Skip icon domains
     if (src && isIconDomain(src)) return true;
+
+    // Skip small images (icons, tracking pixels) — check HTML attributes and natural size
+    if (el.tagName === "IMG") {
+      const w = el.naturalWidth || parseInt(el.getAttribute("width"), 10) || 0;
+      const h = el.naturalHeight || parseInt(el.getAttribute("height"), 10) || 0;
+      if (w > 0 && h > 0 && (w < 40 || h < 40)) return true;
+    }
 
     return false;
   }
@@ -238,8 +251,8 @@
     const dataUrl = await imageToDataUrl(el, src);
     console.log("[SE] Data URL result:", dataUrl ? "ok (" + dataUrl.length + " chars)" : "null");
     if (!dataUrl) {
-      // Can't fetch image — show it rather than blocking
-      markSafe(el);
+      // Can't fetch image — strict mode: hide it
+      markBlocked(el);
       scannedCount++;
       return;
     }
@@ -264,8 +277,8 @@
       }
     } catch (err) {
       console.error("[SE] Analysis error:", err);
-      // Analysis failed — show image rather than blocking
-      markSafe(el);
+      // Analysis failed — strict mode: hide image
+      markBlocked(el);
       scannedCount++;
     }
   }
@@ -275,7 +288,7 @@
   function processImage(el) {
     if (shouldSkip(el)) {
       // Safe to show — icons, SVGs, favicons
-      el.classList.remove("shmirat-eynaim-pending");
+      markSafe(el);
       return;
     }
 
@@ -283,8 +296,8 @@
     if (el.tagName === "IMG" && !el.complete) {
       el.addEventListener("load", () => handleLoadedImage(el), { once: true });
       el.addEventListener("error", () => {
-        // Broken image — show it (browser will show broken icon anyway)
-        markSafe(el);
+        // Broken image — can't analyze, so block it (strict mode)
+        markBlocked(el);
         scannedCount++;
       }, { once: true });
       return;
@@ -294,6 +307,13 @@
   }
 
   function handleLoadedImage(el) {
+    // Broken/errored images: complete but have 0 natural dimensions
+    if (el.tagName === "IMG" && el.complete && el.naturalWidth === 0) {
+      markBlocked(el);
+      scannedCount++;
+      return;
+    }
+
     if (isTooSmall(el)) {
       markSafe(el);
       return;

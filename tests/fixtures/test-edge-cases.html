@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test: Edge Cases — Background Images, Lazy-Load, Data URIs, Broken Images</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f5f5f5; }
+    .section { margin-bottom: 32px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, 250px); gap: 16px; }
+    .grid img, .grid .bg-box { width: 240px; height: 180px; object-fit: cover; border-radius: 8px; }
+    .bg-box {
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: bold; font-size: 14px;
+      background-size: cover; background-position: center;
+      border: 2px solid #ccc;
+    }
+    .label { font-size: 12px; color: #666; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Edge Cases Test Page</h1>
+  <p>Tests background images, lazy-loaded images, data URI images, and broken images.</p>
+
+  <!-- 1. Background image (female face) — should be detected and hidden -->
+  <div class="section">
+    <h2>Background Image (CSS)</h2>
+    <p>Element with a female face set via CSS <code>background-image</code>. Should be hidden by the extension.</p>
+    <div class="grid">
+      <div>
+        <div class="bg-box" style="background-image: url('https://randomuser.me/api/portraits/women/55.jpg');" data-test="bg-image">
+          BG Image — Female Face
+        </div>
+        <div class="label">data-test="bg-image"</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Lazy-loaded image (data-src, no src initially) — female face -->
+  <div class="section">
+    <h2>Lazy-Loaded Image</h2>
+    <p>Image with <code>data-src</code> only (no <code>src</code>). After 2 seconds, JS copies <code>data-src</code> to <code>src</code> to simulate lazy loading. Should be hidden once loaded.</p>
+    <div class="grid">
+      <div>
+        <img data-src="https://randomuser.me/api/portraits/women/60.jpg" alt="lazy-loaded portrait" data-test="lazy" width="240" height="180" style="border: 2px dashed #aaa; border-radius: 8px;">
+        <div class="label">data-test="lazy" (loads after 2s)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Data URI image (small colored square) — safe, should remain visible -->
+  <div class="section">
+    <h2>Data URI Image</h2>
+    <p>A small 2x2 red square encoded as a base64 PNG data URI. No face content — should remain visible.</p>
+    <div class="grid">
+      <div>
+        <!-- 2x2 red PNG -->
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVQIW2P8z8BQDwQMYBIALBkD/Rb72REAAAAASUVORK5CYII=" alt="data-uri red square" data-test="data-uri" width="240" height="180" style="border: 2px solid #ccc; border-radius: 8px; image-rendering: pixelated;">
+        <div class="label">data-test="data-uri" (safe — no face)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Broken image (nonexistent URL) -->
+  <div class="section">
+    <h2>Broken Image</h2>
+    <p>Image with <code>src</code> pointing to a URL that does not exist. Extension behavior depends on strict mode settings.</p>
+    <div class="grid">
+      <div>
+        <img src="https://invalid.example.com/this-image-does-not-exist-at-all.jpg" alt="broken image" data-test="broken" width="240" height="180" style="border: 2px solid #e74c3c; border-radius: 8px;">
+        <div class="label">data-test="broken" (nonexistent URL)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Simulate lazy-load trigger after 2 seconds -->
+  <script>
+    setTimeout(() => {
+      document.querySelectorAll('img[data-src]').forEach(img => {
+        img.src = img.dataset.src;
+        console.log('[lazy-load] Set src for:', img.dataset.test);
+      });
+    }, 2000);
+  </script>
+
+  <div id="results" style="margin-top: 40px; padding: 16px; background: white; border-radius: 8px;">
+    <h2>Test Results</h2>
+    <p id="count">Checking... (results appear after 15 seconds)</p>
+    <pre id="details" style="font-size: 12px; background: #f0f0f0; padding: 12px; border-radius: 4px; overflow-x: auto;"></pre>
+    <script>
+      setTimeout(() => {
+        const results = [];
+        document.querySelectorAll('[data-test]').forEach(el => {
+          const s = getComputedStyle(el);
+          const isHidden = s.display === 'none' || s.visibility === 'hidden' ||
+            parseFloat(s.opacity) === 0 || el.classList.contains('shmirat-eynaim-blocked');
+          const type = el.dataset.test;
+          // bg-image and lazy contain female faces — should be hidden
+          // data-uri is safe — should remain visible
+          // broken — behavior depends on strict mode
+          const shouldHide = (type === 'bg-image' || type === 'lazy');
+          const shouldShow = (type === 'data-uri');
+          let status;
+          if (shouldHide) {
+            status = isHidden ? 'PASS (hidden)' : 'FAIL (should be hidden)';
+          } else if (shouldShow) {
+            status = !isHidden ? 'PASS (visible)' : 'FAIL (should be visible)';
+          } else {
+            // broken — just report state
+            status = isHidden ? 'hidden (strict mode)' : 'visible (permissive mode)';
+          }
+          results.push({ type, isHidden, status });
+        });
+
+        const passes = results.filter(r => r.status.startsWith('PASS')).length;
+        const failures = results.filter(r => r.status.startsWith('FAIL')).length;
+        const total = results.length;
+
+        document.getElementById('count').textContent =
+          `${passes} passed, ${failures} failed, ${total - passes - failures} informational out of ${total} checks.` +
+          (failures === 0 ? ' All expected results correct.' : ' Some checks failed — see details below.');
+
+        document.getElementById('details').textContent =
+          results.map(r => `[${r.type}] hidden=${r.isHidden} => ${r.status}`).join('\n');
+
+        console.table(results);
+      }, 15000);
+    </script>
+  </div>
+</body>
+</html>

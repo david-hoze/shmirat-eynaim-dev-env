@@ -267,8 +267,8 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
   if (!modelsLoaded) {
     const loaded = await loadModels();
     if (!loaded) {
-      // Models unavailable — show the image rather than block everything
-      return { containsWomen: false, error: "models_not_loaded" };
+      // Models unavailable — strict mode: block image
+      return { containsWomen: true, error: "models_not_loaded" };
     }
   }
 
@@ -341,8 +341,8 @@ async function analyzeImageData(imageDataUrl, originalUrl) {
     return result;
   } catch (err) {
     console.error("[Shmirat Eynaim] Analysis error:", err);
-    // Permissive: show image on error rather than blocking everything
-    return { containsWomen: false, error: err.message };
+    // Strict mode: block image on error
+    return { containsWomen: true, error: err.message };
   }
 }
 

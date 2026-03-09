@@ -1,64 +1,160 @@
 // tests/helpers/firefox-extension.js
-// Helper for loading a temporary Firefox extension in Playwright
+// Helper for loading a Firefox extension in Playwright via Remote Debugging Protocol
 //
-// Firefox extension loading in Playwright:
-// Unlike Chromium (which supports --load-extension), Firefox requires
-// installing extensions via the browser's internal APIs. We use
-// Playwright's CDP-free approach: create a profile with the extension
-// pre-installed, or use the web-ext tool to load it temporarily.
-//
-// Strategy: Use `web-ext run` to launch Firefox with the extension,
-// then connect Playwright to the existing browser. Alternatively,
-// install the extension via the about:debugging API.
+// Strategy: Launch Firefox with -start-debugger-server, connect via TCP,
+// and use installTemporaryAddon to load the extension.
 
-const { execSync, spawn } = require("child_process");
+const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const net = require("net");
 
 const EXTENSION_DIR = path.resolve(__dirname, "../../shmirat-eynaim");
+const RDP_PORT = 12345;
 
 /**
- * Create a Firefox profile with the extension pre-installed.
- * This copies the extension to the profile's extensions directory.
+ * Send a message to Firefox RDP and wait for response
  */
-function createProfileWithExtension() {
-  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-profile-"));
-  const extensionsDir = path.join(profileDir, "extensions");
-  fs.mkdirSync(extensionsDir, { recursive: true });
+function rdpSend(socket, message) {
+  return new Promise((resolve, reject) => {
+    const json = JSON.stringify(message);
+    const payload = `${json.length}:${json}`;
 
-  // Read the extension ID from manifest.json
-  const manifest = JSON.parse(
-    fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf-8")
-  );
+    let buffer = "";
+    const onData = (data) => {
+      buffer += data.toString();
+      // RDP messages are length:json format
+      const colonIdx = buffer.indexOf(":");
+      if (colonIdx === -1) return;
+      const len = parseInt(buffer.substring(0, colonIdx), 10);
+      const jsonStart = colonIdx + 1;
+      if (buffer.length >= jsonStart + len) {
+        socket.removeListener("data", onData);
+        try {
+          const response = JSON.parse(buffer.substring(jsonStart, jsonStart + len));
+          resolve(response);
+        } catch (e) {
+          reject(new Error("Failed to parse RDP response: " + buffer.substring(jsonStart, jsonStart + len)));
+        }
+      }
+    };
 
-  // The extension ID from manifest's browser_specific_settings.gecko.id
-  // or fall back to a generated one
-  const extId =
-    manifest?.browser_specific_settings?.gecko?.id ||
-    manifest?.applications?.gecko?.id ||
-    "shmirat-eynaim@example.com";
+    socket.on("data", onData);
+    socket.write(payload);
 
-  // Copy extension directory as {id} directory in the profile
-  const extDest = path.join(extensionsDir, extId);
-  copyDirSync(EXTENSION_DIR, extDest);
+    // Timeout after 10 seconds
+    setTimeout(() => {
+      socket.removeListener("data", onData);
+      reject(new Error("RDP timeout"));
+    }, 10000);
+  });
+}
 
-  // Create user.js with required prefs
-  const userPrefs = `
-user_pref("xpinstall.signatures.required", false);
-user_pref("extensions.autoDisableScopes", 0);
-user_pref("extensions.enabledScopes", 15);
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.startup.homepage_override.mstone", "ignore");
-user_pref("datareporting.policy.dataSubmissionEnabled", false);
-user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
-user_pref("app.update.enabled", false);
-user_pref("browser.startup.page", 0);
-user_pref("browser.startup.homepage", "about:blank");
-`;
-  fs.writeFileSync(path.join(profileDir, "user.js"), userPrefs);
+/**
+ * Connect to Firefox RDP and install the extension as a temporary addon
+ */
+async function installExtensionViaRDP(extensionPath, port = RDP_PORT) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    let resolved = false;
 
-  return { profileDir, extId };
+    socket.connect(port, "127.0.0.1", async () => {
+      try {
+        // Read the initial greeting/handshake
+        await new Promise((res) => {
+          let buf = "";
+          const onData = (data) => {
+            buf += data.toString();
+            const colonIdx = buf.indexOf(":");
+            if (colonIdx === -1) return;
+            const len = parseInt(buf.substring(0, colonIdx), 10);
+            if (buf.length >= colonIdx + 1 + len) {
+              socket.removeListener("data", onData);
+              res();
+            }
+          };
+          socket.on("data", onData);
+        });
+
+        // Get root actor to find addons actor
+        const root = await rdpSend(socket, { to: "root", type: "getRoot" });
+        const addonsActor = root.addonsActor;
+
+        if (!addonsActor) {
+          throw new Error("No addons actor found in RDP root: " + JSON.stringify(root));
+        }
+
+        // Install the temporary addon
+        const result = await rdpSend(socket, {
+          to: addonsActor,
+          type: "installTemporaryAddon",
+          addonPath: extensionPath,
+        });
+
+        if (result.error) {
+          throw new Error("Failed to install addon: " + JSON.stringify(result));
+        }
+
+        console.log("[Extension Helper] Extension installed via RDP:", result.addon?.id || "ok");
+        resolved = true;
+        socket.destroy();
+        resolve(result);
+      } catch (err) {
+        socket.destroy();
+        if (!resolved) reject(err);
+      }
+    });
+
+    socket.on("error", (err) => {
+      if (!resolved) reject(err);
+    });
+  });
+}
+
+/**
+ * Wait for the RDP port to become available
+ */
+async function waitForRDP(port = RDP_PORT, timeout = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = new net.Socket();
+        socket.connect(port, "127.0.0.1", () => {
+          socket.destroy();
+          resolve();
+        });
+        socket.on("error", reject);
+        socket.setTimeout(1000, () => {
+          socket.destroy();
+          reject(new Error("timeout"));
+        });
+      });
+      return; // Connected successfully
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw new Error(`RDP port ${port} not available after ${timeout}ms`);
+}
+
+/**
+ * Get launch options for Firefox with debugger server enabled.
+ * After launching, call installExtensionViaRDP() to load the extension.
+ */
+function getFirefoxLaunchOptions(port = RDP_PORT) {
+  return {
+    firefoxUserPrefs: {
+      "xpinstall.signatures.required": false,
+      "extensions.autoDisableScopes": 0,
+      "extensions.enabledScopes": 15,
+      "devtools.debugger.remote-enabled": true,
+      "devtools.debugger.prompt-connection": false,
+      "devtools.chrome.enabled": true,
+    },
+    args: ["-start-debugger-server", String(port), "-no-remote"],
+  };
 }
 
 /**
@@ -78,43 +174,26 @@ function copyDirSync(src, dest) {
   }
 }
 
-/**
- * Launch Firefox with the extension using Playwright.
- * Returns a configured browser launch options object.
- */
-function getFirefoxLaunchOptions() {
-  const { profileDir, extId } = createProfileWithExtension();
+// Keep createProfileWithExtension for backward compat but it's no longer primary
+function createProfileWithExtension() {
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fx-profile-"));
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf-8")
+  );
+  const extId =
+    manifest?.browser_specific_settings?.gecko?.id ||
+    manifest?.applications?.gecko?.id ||
+    "shmirat-eynaim@example.com";
 
-  return {
-    firefoxUserPrefs: {
-      "xpinstall.signatures.required": false,
-      "extensions.autoDisableScopes": 0,
-      "extensions.enabledScopes": 15,
-    },
-    args: ["-profile", profileDir, "-no-remote"],
-    _profileDir: profileDir,  // For cleanup
-    _extId: extId,
-  };
-}
-
-/**
- * Install extension via web-ext (alternative approach).
- * Requires: npm install -g web-ext
- */
-function installViaWebExt(port) {
-  try {
-    execSync(
-      `web-ext run --source-dir="${EXTENSION_DIR}" --firefox-port=${port} --no-reload`,
-      { timeout: 10_000 }
-    );
-  } catch (err) {
-    console.warn("web-ext installation failed:", err.message);
-  }
+  return { profileDir, extId };
 }
 
 module.exports = {
   EXTENSION_DIR,
-  createProfileWithExtension,
+  RDP_PORT,
   getFirefoxLaunchOptions,
+  installExtensionViaRDP,
+  waitForRDP,
+  createProfileWithExtension,
   copyDirSync,
 };
