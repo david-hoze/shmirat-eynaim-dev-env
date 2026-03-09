@@ -70,6 +70,7 @@ Submit a classification result.
 **Behavior:**
 - If the hash doesn't exist, creates a new record with initial vote counts.
 - If the hash already exists, increments the appropriate vote counter (`voteBlock` or `voteSafe`) and averages the confidence.
+- Logs an individual vote record (hash, user, source, confidence, timestamp) for audit purposes. One vote per user per image — re-submissions update the existing vote in place.
 - Increments the submitting user's contribution count.
 
 **Response (200):**

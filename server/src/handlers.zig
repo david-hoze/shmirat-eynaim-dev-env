@@ -217,19 +217,49 @@ pub fn handlePostClassification(allocator: std.mem.Allocator, database: *db_mod.
 
     _ = try stmt.step();
 
-    // Increment user's contribution count
+    // Log individual vote and increment contribution count
     if (auth_header) |h| {
         if (std.mem.startsWith(u8, h, "Bearer ")) {
+            const token = h["Bearer ".len..];
+
+            // Get user ID for the vote record
+            var user_stmt = try database.prepare("SELECT id FROM users WHERE token = ?1");
+            defer user_stmt.deinit();
+            try user_stmt.bindText(1, token);
+            if (try user_stmt.step()) {
+                const user_id = user_stmt.columnInt(0);
+
+                // Insert individual vote (UNIQUE(hash, user_id) prevents exact duplicates,
+                // but allows updating if the same user re-classifies)
+                var vote_stmt = try database.prepare(
+                    \\INSERT INTO votes (hash, user_id, contains_women, confidence, source)
+                    \\VALUES (?1, ?2, ?3, ?4, ?5)
+                    \\ON CONFLICT(hash, user_id) DO UPDATE SET
+                    \\    contains_women = ?3,
+                    \\    confidence = ?4,
+                    \\    source = ?5,
+                    \\    created_at = CURRENT_TIMESTAMP
+                );
+                defer vote_stmt.deinit();
+                try vote_stmt.bindText(1, req.hash);
+                try vote_stmt.bindInt(2, user_id);
+                try vote_stmt.bindInt(3, if (req.containsWomen) 1 else 0);
+                try vote_stmt.bindFloat(4, req.confidence);
+                try vote_stmt.bindText(5, req.source);
+                _ = vote_stmt.step() catch {};
+            }
+
+            // Increment contribution count
             var contrib_stmt = try database.prepare(
                 "UPDATE users SET contribution_count = contribution_count + 1 WHERE token = ?1",
             );
             defer contrib_stmt.deinit();
-            try contrib_stmt.bindText(1, h["Bearer ".len..]);
+            try contrib_stmt.bindText(1, token);
             _ = try contrib_stmt.step();
         }
     }
 
-    std.log.info("Classification stored: hash={s} containsWomen={}", .{ req.hash, req.containsWomen });
+    std.log.info("Classification stored: hash={s} containsWomen={} source={s}", .{ req.hash, req.containsWomen, req.source });
     try sendResponse(request, .ok, "{\"success\":true}");
 
     // Periodically clean up rate limits (every request is fine for low traffic)

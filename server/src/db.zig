@@ -125,6 +125,23 @@ pub const Database = struct {
         );
 
         try self.exec(
+            \\CREATE TABLE IF NOT EXISTS votes (
+            \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\    hash TEXT NOT NULL,
+            \\    user_id INTEGER NOT NULL,
+            \\    contains_women INTEGER NOT NULL,
+            \\    confidence REAL NOT NULL DEFAULT 0.0,
+            \\    source TEXT NOT NULL DEFAULT 'local',
+            \\    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            \\    UNIQUE(hash, user_id)
+            \\);
+        );
+
+        try self.exec(
+            \\CREATE INDEX IF NOT EXISTS idx_votes_hash ON votes(hash);
+        );
+
+        try self.exec(
             \\CREATE TABLE IF NOT EXISTS rate_limits (
             \\    token TEXT NOT NULL,
             \\    window_start DATETIME NOT NULL,

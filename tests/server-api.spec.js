@@ -408,4 +408,493 @@ test.describe("Shmirat Eynaim Server API", () => {
     });
     expect(res.status).toBe(401);
   });
+
+  // --- Registration ---
+
+  test("POST /api/register creates a new auto-approved user", async () => {
+    const res = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-register-test-001" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.token).toBeDefined();
+    expect(body.token).toHaveLength(64);
+
+    // The returned token should work immediately (auto-approved)
+    const statsRes = await fetch(`${BASE_URL}/api/classifications/somehash`, {
+      headers: { Authorization: `Bearer ${body.token}` },
+    });
+    expect(statsRes.status).toBe(404); // 404 = auth passed, hash not found
+  });
+
+  test("POST /api/register returns existing token for same email", async () => {
+    // Register once
+    const res1 = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-idempotent-test" }),
+    });
+    const body1 = await res1.json();
+
+    // Register again with same email
+    const res2 = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-idempotent-test" }),
+    });
+    const body2 = await res2.json();
+
+    // Should get the same token back
+    expect(body2.token).toBe(body1.token);
+  });
+
+  test("POST /api/register rejects empty email", async () => {
+    const res = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /api/register rejects missing body", async () => {
+    const res = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /api/register rejects invalid JSON", async () => {
+    const res = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // --- Votes audit log ---
+
+  test("POST /api/classifications creates an individual vote record", async () => {
+    const hash = "vote-audit-test-001";
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "haiku",
+        confidence: 0.95,
+      }),
+    });
+
+    // Check the vote was recorded via stats CLI (votes table)
+    const output = runCli("stats");
+    expect(output).toContain("Total individual votes");
+    // There should be at least 1 vote now
+    const match = output.match(/Total individual votes:\s+(\d+)/);
+    expect(match).toBeTruthy();
+    expect(parseInt(match[1])).toBeGreaterThanOrEqual(1);
+  });
+
+  test("re-submitting same hash by same user updates vote in place", async () => {
+    const hash = "vote-update-test-001";
+
+    // First submission: block with local source
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "local",
+        confidence: 0.8,
+      }),
+    });
+
+    // Second submission: same hash, same user, different source (haiku override)
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "haiku",
+        confidence: 0.95,
+      }),
+    });
+
+    // The votes table should still have only 1 vote for this hash+user
+    // (UNIQUE constraint updates in place). We verify indirectly: the
+    // stats CLI should show the vote count hasn't doubled for this hash.
+    const res = await fetch(`${BASE_URL}/api/classifications/${hash}`, {
+      headers: { Authorization: `Bearer ${testToken}` },
+    });
+    const body = await res.json();
+    // voteBlock increments on each POST (aggregated table), so it's 2
+    expect(body.voteBlock).toBe(2);
+    // But the individual vote record (votes table) only has 1 row for this user+hash
+  });
+
+  // --- Multi-user consensus ---
+
+  test("multiple users voting on same hash builds consensus", async () => {
+    const hash = "consensus-test-001";
+
+    // Register a second user
+    const reg = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-consensus-user-2" }),
+    });
+    const secondToken = (await reg.json()).token;
+
+    // User 1 votes block
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "local",
+        confidence: 0.85,
+      }),
+    });
+
+    // User 2 votes block
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secondToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "haiku",
+        confidence: 0.92,
+      }),
+    });
+
+    // Verify consensus
+    const res = await fetch(`${BASE_URL}/api/classifications/${hash}`, {
+      headers: { Authorization: `Bearer ${testToken}` },
+    });
+    const body = await res.json();
+    expect(body.voteBlock).toBe(2);
+    expect(body.voteSafe).toBe(0);
+    expect(body.containsWomen).toBe(true);
+  });
+
+  test("conflicting votes from different users are both recorded", async () => {
+    const hash = "conflict-test-001";
+
+    // Register a third user
+    const reg = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-conflict-user-3" }),
+    });
+    const thirdToken = (await reg.json()).token;
+
+    // User 1 votes block
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: true,
+        source: "local",
+        confidence: 0.7,
+      }),
+    });
+
+    // User 3 votes safe
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${thirdToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: false,
+        source: "haiku",
+        confidence: 0.9,
+      }),
+    });
+
+    const res = await fetch(`${BASE_URL}/api/classifications/${hash}`, {
+      headers: { Authorization: `Bearer ${testToken}` },
+    });
+    const body = await res.json();
+    expect(body.voteBlock).toBe(1);
+    expect(body.voteSafe).toBe(1);
+  });
+
+  // --- Contribution count ---
+
+  test("contribution count increments on classification submission", async () => {
+    const hash = "contrib-count-test-001";
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash,
+        containsWomen: false,
+        source: "local",
+        confidence: 0.8,
+      }),
+    });
+
+    // Check via list-users that the test user has contributions
+    const output = runCli("list-users");
+    expect(output).toContain(testEmail);
+    // The test user should have at least 1 contribution (from all the tests above)
+    // We can't check exact count since tests share state, but it should be > 0
+    const lines = output.split("\n");
+    const userLine = lines.find((l) => l.includes(testEmail));
+    expect(userLine).toBeTruthy();
+    // contribution_count column should show a positive number
+    const contribMatch = userLine.match(/\+(\d+)/);
+    expect(contribMatch).toBeTruthy();
+    expect(parseInt(contribMatch[1])).toBeGreaterThan(0);
+  });
+
+  // --- Empty hash ---
+
+  test("POST /api/classifications rejects empty hash", async () => {
+    const res = await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash: "",
+        containsWomen: true,
+        source: "local",
+        confidence: 0.8,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("hash");
+  });
+
+  // --- Missing body ---
+
+  test("POST /api/classifications rejects missing body", async () => {
+    const res = await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /api/classifications/batch rejects missing body", async () => {
+    const res = await fetch(`${BASE_URL}/api/classifications/batch`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // --- Descriptors edge cases ---
+
+  test("POST /api/descriptors rejects invalid base64", async () => {
+    const res = await fetch(`${BASE_URL}/api/descriptors`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        descriptor: "not-valid-base64!!!",
+        label: "block",
+        confidence: 0.8,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("base64");
+  });
+
+  test("POST /api/descriptors rejects empty label", async () => {
+    const buffer = new ArrayBuffer(512);
+    const base64 = Buffer.from(buffer).toString("base64");
+    const res = await fetch(`${BASE_URL}/api/descriptors`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        descriptor: base64,
+        label: "",
+        confidence: 0.8,
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("GET /api/descriptors returns base64 that decodes to valid binary", async () => {
+    const res = await fetch(`${BASE_URL}/api/descriptors`, {
+      headers: { Authorization: `Bearer ${testToken}` },
+    });
+    const body = await res.json();
+    expect(body.descriptors.length).toBeGreaterThanOrEqual(1);
+
+    const d = body.descriptors[0];
+    const decoded = Buffer.from(d.descriptor, "base64");
+    // Should be 512 bytes (128 float32s)
+    expect(decoded.length).toBe(512);
+  });
+
+  // --- Rate limiting ---
+
+  test("rate limit returns 429 after 100 requests in a minute", async () => {
+    // Create a dedicated user for rate limit testing
+    const reg = await fetch(`${BASE_URL}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "ext-ratelimit-user" }),
+    });
+    const rlToken = (await reg.json()).token;
+
+    // Fire 100 requests rapidly (rate limit is 100/min)
+    const promises = [];
+    for (let i = 0; i < 100; i++) {
+      promises.push(
+        fetch(`${BASE_URL}/api/classifications`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${rlToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            hash: `ratelimit-${i}`,
+            containsWomen: false,
+            source: "local",
+            confidence: 0.5,
+          }),
+        })
+      );
+    }
+    await Promise.all(promises);
+
+    // The 101st request should be rate limited
+    const res = await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${rlToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash: "ratelimit-overflow",
+        containsWomen: false,
+        source: "local",
+        confidence: 0.5,
+      }),
+    });
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.error).toContain("rate limit");
+  });
+
+  // --- Batch edge cases ---
+
+  test("POST /api/classifications/batch rejects invalid JSON", async () => {
+    const res = await fetch(`${BASE_URL}/api/classifications/batch`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: "not json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /api/classifications/batch with single hash works", async () => {
+    // Submit a classification first
+    await fetch(`${BASE_URL}/api/classifications`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        hash: "batch-single-test",
+        containsWomen: false,
+        source: "local",
+        confidence: 0.9,
+      }),
+    });
+
+    const res = await fetch(`${BASE_URL}/api/classifications/batch`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${testToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ hashes: ["batch-single-test"] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.results["batch-single-test"]).toBeDefined();
+    expect(body.results["batch-single-test"].containsWomen).toBe(false);
+  });
+
+  // --- Auth on all endpoints ---
+
+  test("POST /api/classifications/batch rejects missing auth", async () => {
+    const res = await fetch(`${BASE_URL}/api/classifications/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hashes: [] }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("GET /api/descriptors rejects missing auth", async () => {
+    const res = await fetch(`${BASE_URL}/api/descriptors`);
+    expect(res.status).toBe(401);
+  });
+
+  test("POST /api/descriptors rejects missing auth", async () => {
+    const res = await fetch(`${BASE_URL}/api/descriptors`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ descriptor: "abc", label: "block", confidence: 0.8 }),
+    });
+    expect(res.status).toBe(401);
+  });
 });

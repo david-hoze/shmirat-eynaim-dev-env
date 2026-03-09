@@ -65,13 +65,51 @@ Output:
 ```
 === Shmirat Eynaim Server Stats ===
 
-Total users:       2
-Approved users:    1
-Classifications:   12847
-  - blocked:       8234
-  - safe:          4613
-Face descriptors:  3201
+Total users:       7
+Approved users:    5
+Classifications:   190
+  - blocked:       39
+  - safe:          151
+Face descriptors:  0
+
+--- Vote Distribution ---
+
+  Single vote:     174
+  2+ votes (consensus): 16
+  3+ votes (strong):    5
+  Max votes on single image: 5
+
+--- Consensus Quality ---
+
+  Unanimous (all agree): 16
+  Conflicted (mixed votes): 0
+
+--- Top Contributors ---
+
+  ext-03a8ae507531d5598d8b2170f3498149     114 contributions
+  ext-810bf2e92e4bc21012d8533906b43471     99 contributions
+
+--- Vote Sources ---
+
+  Total individual votes: 42
+  local (ML):    30
+  haiku (AI):    8
+  user (manual): 4
+  other:         0
+
+--- Cache Efficiency ---
+
+  Total votes cast:     216
+  Unique images hashed: 190
+  Redundant lookups saved: 26
 ```
+
+The stats command shows:
+- **Vote Distribution**: How many images have single vs consensus votes
+- **Consensus Quality**: Unanimous agreement vs conflicted classifications
+- **Top Contributors**: Most active extension instances
+- **Vote Sources**: Breakdown by classification origin (local ML, Haiku AI, manual user input) — sourced from the individual votes audit log
+- **Cache Efficiency**: How many redundant API/ML calls the shared cache has prevented
 
 ### Logs
 

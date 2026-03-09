@@ -298,7 +298,26 @@ async function handleCloudClassify(imageUrl, imageDataUrl, localResult) {
     return inFlightUrls.get(imageUrl);
   }
 
-  // 3. Check if cloud is disabled
+  // 3. Check shared server — if another user already classified this hash, skip Haiku
+  if (serverEnabled && serverToken) {
+    try {
+      const hash = await hashUrl(imageUrl);
+      const data = await serverFetch("/api/classifications/batch", {
+        method: "POST",
+        body: JSON.stringify({ hashes: [hash] }),
+      });
+      if (data && data.results && data.results[hash]) {
+        const sv = data.results[hash];
+        const result = { containsWomen: sv.containsWomen, source: "server" };
+        cloudCache[imageUrl] = { containsWomen: sv.containsWomen, timestamp: Date.now() };
+        cloudSavedCount++;
+        saveState();
+        return result;
+      }
+    } catch { /* server unreachable — fall through to Haiku */ }
+  }
+
+  // 4. Check if cloud is disabled
   if (cloudMode === "never" || !anthropicApiKey) {
     return null;
   }

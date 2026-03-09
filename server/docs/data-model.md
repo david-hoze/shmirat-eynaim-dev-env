@@ -34,6 +34,25 @@ Shared image classification results, keyed by perceptual hash.
 - The appropriate vote counter is incremented
 - Confidence is averaged: `new_confidence = (submitted + existing) / 2`
 - `last_updated` is refreshed
+- An individual vote record is stored in the Votes table (see below)
+
+### Votes
+
+Individual vote audit log. Each submission is recorded with full context — who voted, what source they used, and when. The Classifications table is the aggregated view; this table is the raw record.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | integer | Auto-increment primary key |
+| hash | text | Image hash (references classifications) |
+| user_id | integer | Who cast this vote (references users) |
+| contains_women | integer | 1 = yes, 0 = no |
+| confidence | real | Source confidence (0.0–1.0) |
+| source | text | `"local"`, `"haiku"`, or `"user"` |
+| created_at | datetime | When the vote was cast |
+
+**Constraints:**
+- `UNIQUE(hash, user_id)` — one vote per user per image. If the same user re-classifies (e.g., local ML first, then Haiku overrides), the vote is updated in place with the latest source and confidence.
+- Indexed on `hash` for efficient lookups.
 
 ### Descriptors
 
@@ -75,7 +94,8 @@ Extension classifies image
        ├─ Run local ML on unknown images
        │
        ├─ POST /api/classifications {hash, containsWomen, ...}
-       │   → Server stores result, increments votes
+       │   → Server stores/updates aggregated result, increments votes
+       │   → Individual vote logged in votes table with source and user
        │
        └─ POST /api/descriptors {descriptor, label, ...}
            → Server stores face descriptor for shared learning

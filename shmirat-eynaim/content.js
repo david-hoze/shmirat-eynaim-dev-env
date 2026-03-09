@@ -604,6 +604,9 @@
           cloudCache[src] = { containsWomen, timestamp: Date.now() };
           urlCache.set(src, { ...localResult, containsWomen, cloudOverride: true });
 
+          // Submit Haiku result to shared server (higher confidence than local)
+          serverSubmitClassification(src, containsWomen, "haiku", cloudResult.confidence || 0.95);
+
           // If cloud disagrees with local, update the element
           if (containsWomen !== localResult.containsWomen) {
             if (containsWomen) {
