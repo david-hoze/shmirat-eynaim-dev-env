@@ -22,6 +22,12 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "js": ["content-early.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
       "js": ["lib/face-api.min.js", "lib/tf-global-shim.js", "lib/coco-ssd.min.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_end",

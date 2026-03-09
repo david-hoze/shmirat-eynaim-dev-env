@@ -1,0 +1,11 @@
+/* Injected at document_start — hides images BEFORE they render.
+   The content script (document_end) adds .shmirat-eynaim-safe to reveal
+   analyzed images, or .shmirat-eynaim-blocked to keep them hidden.
+   Once JS marks all images, this blanket rule has no effect since every
+   image has one of those classes.
+   If the extension is disabled or the site is whitelisted, the content
+   script injects an override style to undo this. */
+img:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending),
+video[poster]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending) {
+  opacity: 0 !important;
+}

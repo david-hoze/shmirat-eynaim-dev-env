@@ -12,6 +12,8 @@
   }
 
   if (!state.blockingEnabled || state.whitelisted) {
+    const earlyHide = document.getElementById("shmirat-eynaim-early-hide");
+    if (earlyHide) earlyHide.remove();
     return; // Extension off or site whitelisted
   }
 
@@ -871,10 +873,20 @@
 
   // --- Initial sweep ---
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => discoverImages(document.body));
-  } else {
+  function initialScan() {
     discoverImages(document.body);
+    // Remove the blanket JS hide (img { opacity: 0 }).
+    // The CSS hide (content-early.css) stays active — it only targets images
+    // without .pending/.safe/.blocked classes, so it catches dynamically added
+    // images until the MutationObserver processes them.
+    const earlyHide = document.getElementById("shmirat-eynaim-early-hide");
+    if (earlyHide) earlyHide.remove();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialScan);
+  } else {
+    initialScan();
   }
   window.addEventListener("load", () => discoverImages(document.body));
 })();
