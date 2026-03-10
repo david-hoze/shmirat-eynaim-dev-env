@@ -564,10 +564,26 @@ function classifyImage(url, imageDataUrl) {
         mlDescriptors = result.descriptors;
       }
 
-      // Priority resolution: ignore results from lower-priority sources
-      // that arrive after a higher-priority source already answered
+      // STRICT MODE priority resolution:
+      //   - BLOCK wins: if ANY source says block, stay blocked.
+      //     Only a USER-level (priority 4) SAFE can override a block.
+      //   - SAFE only sticks if no source has said block yet.
+      // This ensures false negatives are minimized (strict mode principle).
       if (bestResult && result.priority < bestResult.priority) {
-        debugLog(`  IGNORED (${PRIORITY_NAMES[result.priority]} < ${PRIORITY_NAMES[bestResult.priority]})`, shortUrl);
+        // Lower-priority result arriving late — only accept if it's a BLOCK
+        // (blocks always escalate, but safe from lower priority is ignored)
+        if (!result.containsWomen) {
+          debugLog(`  IGNORED safe (${PRIORITY_NAMES[result.priority]} < ${PRIORITY_NAMES[bestResult.priority]})`, shortUrl);
+          return;
+        }
+      }
+
+      // A higher-priority source says SAFE, but a previous source said BLOCK:
+      // Only USER-level can override a block to safe. All other safe results
+      // are ignored once any source has said block (strict mode).
+      if (bestResult && bestResult.containsWomen && !result.containsWomen
+          && result.priority < PRIORITY.USER) {
+        debugLog(`  STRICT: keeping block despite ${PRIORITY_NAMES[result.priority]} safe`, shortUrl);
         return;
       }
 
@@ -582,7 +598,7 @@ function classifyImage(url, imageDataUrl) {
       if (isFirst) {
         debugLog("  FIRST RESULT:", PRIORITY_NAMES[result.priority], `(${elapsed}ms)`, shortUrl);
       } else if (changed) {
-        // Higher-priority source disagrees — notify tabs to update the DOM
+        // Source escalated from safe to block — notify tabs to update the DOM
         console.log("[SE] Override:", result.reason, "says", result.containsWomen ? "block" : "safe",
           "for", url.substring(0, 60));
         notifyTabs(url, result.containsWomen, result.reason);
