@@ -1,0 +1,8 @@
+package shmirat-eynaim-test
+
+opts = "--cg node"
+sourcedir = "src"
+builddir = "build-test"
+
+main = Test.Main
+executable = test-runner

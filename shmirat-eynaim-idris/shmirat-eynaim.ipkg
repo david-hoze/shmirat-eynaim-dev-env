@@ -1,0 +1,43 @@
+package shmirat-eynaim
+version = 0.1.0
+authors = "Shmirat Eynaim"
+brief   = "Firefox WebExtension for modesty image filtering (Idris 2)"
+
+-- Use the JavaScript code generator
+opts = "--cg javascript --directive pretty"
+
+sourcedir = "src"
+
+-- Entry points (compiled separately for each extension context)
+-- Main module depends on the context:
+--   Background: Extension.Background
+--   Content:    Extension.Content
+--   Popup:      Extension.Popup
+
+modules = FFI.Core
+        , FFI.Browser.Runtime
+        , FFI.Browser.Storage
+        , FFI.Browser.Tabs
+        , FFI.Browser.Menus
+        , FFI.Browser.Action
+        , FFI.DOM.Element
+        , FFI.DOM.Document
+        , FFI.DOM.Canvas
+        , FFI.DOM.Observer
+        , FFI.DOM.Style
+        , FFI.RxJS.Observable
+        , FFI.RxJS.Subject
+        , FFI.RxJS.Operators
+        , FFI.ML.FaceApi
+        , FFI.ML.CocoSsd
+        , FFI.Network
+        , Extension.Types
+        , Extension.Properties
+        , Extension.Background
+        , Extension.Content
+        , Extension.Popup
+        , ML.Detection
+        , ML.Learning
+        , Pipeline.Classification
+        , Pipeline.Priority
+        , UI.Popup
