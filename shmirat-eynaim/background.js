@@ -1544,6 +1544,14 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       });
     }
 
+    case "clearCloudCache": {
+      const count = Object.keys(cloudCache).length;
+      cloudCache = {};
+      saveState();
+      console.log("[SE] Cloud cache cleared:", count, "entries");
+      return Promise.resolve({ success: true, cleared: count });
+    }
+
     case "resetLearning": {
       knownFaces = [];
       knownSafeFaces = [];
