@@ -45,7 +45,14 @@
   function shouldSkip(el) {
     if (el.tagName === "LINK" && el.rel && /icon/i.test(el.rel)) return true;
     const src = el.src || el.currentSrc || "";
-    if (el.tagName === "SVG" || src.endsWith(".svg") || src.startsWith("data:image/svg")) return true;
+    // Skip SVGs that are true icons/graphics, but NOT SVGs used as ad containers.
+    // Ad SVGs (e.g. Google Ads) contain <image> elements with bitmap hrefs.
+    if (el.tagName === "SVG") {
+      const imgChild = el.querySelector("image[href], image[xlink\\:href]");
+      if (imgChild) return false; // Ad container — don't skip
+      return true; // Regular SVG icon — skip
+    }
+    if (src.endsWith(".svg") || src.startsWith("data:image/svg")) return true;
     if (src.startsWith("data:image/") && src.length < 5000) return true;
     if (src && isIconDomain(src)) return true;
     if (el.tagName === "IMG") {
@@ -60,6 +67,11 @@
     if (el.tagName === "IMG" || el.tagName === "IMAGE")
       return el.currentSrc || el.src || el.getAttribute("data-src") || el.getAttribute("data-lazy-src") || "";
     if (el.tagName === "VIDEO") return el.getAttribute("poster") || "";
+    // SVG ad containers: extract href from <image> child
+    if (el.tagName === "svg" || el.tagName === "SVG") {
+      const imgChild = el.querySelector("image[href], image[xlink\\:href]");
+      if (imgChild) return imgChild.getAttribute("href") || imgChild.getAttributeNS("http://www.w3.org/1999/xlink", "href") || "";
+    }
     const bg = getComputedStyle(el).backgroundImage;
     if (bg && bg !== "none") {
       const match = bg.match(/url\(["']?(.+?)["']?\)/);
@@ -356,6 +368,12 @@
     for (const video of root.querySelectorAll("video[poster]")) {
       if (markPending(video)) pendingElements.push(video);
     }
+    // SVG ad containers (e.g. Google Ads) that embed bitmap images
+    for (const svg of root.querySelectorAll("svg")) {
+      if (svg.querySelector("image[href], image[xlink\\:href]")) {
+        if (markPending(svg)) pendingElements.push(svg);
+      }
+    }
 
     // Prefetch: send all new URLs to background so it can batch-query the server
     // in one HTTP call. analyzeElement awaits activePrefetch before checking cache.
@@ -400,6 +418,17 @@
       }
       for (const video of el.querySelectorAll("video[poster]")) {
         if (markPending(video)) allPending.push(video);
+      }
+      for (const svg of el.querySelectorAll("svg")) {
+        if (svg.querySelector("image[href], image[xlink\\:href]")) {
+          if (markPending(svg)) allPending.push(svg);
+        }
+      }
+      // Also check if the mutated element itself is an SVG ad container
+      if (el.tagName === "svg" || el.tagName === "SVG") {
+        if (el.querySelector("image[href], image[xlink\\:href]")) {
+          if (markPending(el)) allPending.push(el);
+        }
       }
     }
     if (allPending.length === 0) return;
@@ -599,6 +628,17 @@
       if (node.tagName === "IMG" && (node.src || node.currentSrc)) {
         return node.currentSrc || node.src;
       }
+      // SVG ad containers with <image> children
+      if (node.tagName === "svg" || node.tagName === "SVG") {
+        const imgChild = node.querySelector("image[href], image[xlink\\:href]");
+        if (imgChild) {
+          return imgChild.getAttribute("href") || imgChild.getAttributeNS("http://www.w3.org/1999/xlink", "href") || null;
+        }
+      }
+      // SVG <image> element itself
+      if (node.tagName === "image" || node.tagName === "IMAGE") {
+        return node.getAttribute("href") || node.getAttributeNS("http://www.w3.org/1999/xlink", "href") || null;
+      }
       const bg = getComputedStyle(node).backgroundImage;
       if (bg && bg !== "none" && bg.includes("url(")) {
         const match = bg.match(/url\(["']?(.+?)["']?\)/);
@@ -610,6 +650,11 @@
       }
       const childVideo = node.querySelector("video[poster]");
       if (childVideo) return childVideo.poster;
+      // Check for SVG ad container in children
+      const childSvg = node.querySelector("svg image[href], svg image[xlink\\:href]");
+      if (childSvg) {
+        return childSvg.getAttribute("href") || childSvg.getAttributeNS("http://www.w3.org/1999/xlink", "href") || null;
+      }
     }
     return null;
   }

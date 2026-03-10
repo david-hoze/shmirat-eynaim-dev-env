@@ -18,3 +18,9 @@ video[poster]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmira
 .thumbBlock[style*="background-image"]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending) {
   opacity: 0 !important;
 }
+
+/* SVG ad containers (Google Ads) that embed bitmap <image> elements */
+svg.img_ad:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending),
+svg.image:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending) {
+  opacity: 0 !important;
+}
