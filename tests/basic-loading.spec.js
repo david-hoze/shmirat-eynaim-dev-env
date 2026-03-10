@@ -393,7 +393,7 @@ test.describe("Edge Cases", () => {
 
     // Background images with female faces should be blocked
     const unblockedBgImages = await page.$$eval(
-      '[data-test="bg-image-female"]',
+      '[data-test="bg-image"]',
       (els) =>
         els.filter((el) => {
           return !el.classList.contains("shmirat-eynaim-blocked");

@@ -327,7 +327,7 @@ const inFlightClassifications = new Map();
 // --- Server readiness (emits once when auto-registration completes) ---
 const serverReady$ = new ReplaySubject(1);
 
-const SERVER_VOTE_THRESHOLD = 1; // min votes to trust server result (2 for prod, 1 for debug)
+const SERVER_VOTE_THRESHOLD = 2; // min votes to trust server result
 
 // --- Batched server lookups via RxJS ---
 // Individual pipelines push {url, resolve} into serverLookup$.
