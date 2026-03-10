@@ -1,6 +1,9 @@
-/* Images start hidden until analyzed */
+/* Images and background-image elements start hidden until analyzed */
 .shmirat-eynaim-pending {
   opacity: 0 !important;
+}
+.shmirat-eynaim-pending[style*="background-image"] {
+  background-image: none !important;
 }
 
 /* Images confirmed safe — no transition, instant reveal */

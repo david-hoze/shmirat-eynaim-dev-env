@@ -9,3 +9,12 @@ img:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-p
 video[poster]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending) {
   opacity: 0 !important;
 }
+
+/* Hide elements with background-image until analyzed.
+   Targets common ad containers (Taboola, etc.) that use inline
+   background-image styles. The content script will mark them
+   safe/blocked once classified. */
+[role="img"][style*="background-image"]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending),
+.thumbBlock[style*="background-image"]:not(.shmirat-eynaim-safe):not(.shmirat-eynaim-blocked):not(.shmirat-eynaim-pending) {
+  opacity: 0 !important;
+}
