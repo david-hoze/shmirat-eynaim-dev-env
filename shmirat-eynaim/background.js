@@ -28,7 +28,7 @@ let cloudSavedCount = 0;  // images handled locally that would have gone to clou
 
 // --- Shared server state ---
 
-const SERVER_URL = "https://feb-hill-provincial-verbal.trycloudflare.com";
+const SERVER_URL = "http://localhost:8080";
 let serverToken = "";   // 64-char hex API token, auto-generated
 let serverEnabled = false;
 let serverDeviceId = ""; // unique per-install identifier used as "email" for registration
@@ -204,8 +204,9 @@ async function loadModels() {
   return modelsLoaded;
 }
 
-// Start loading models immediately
-const modelsReadyPromise = loadModels();
+// Start loading models immediately — emits true/false once, then completes
+const modelsReady$ = new rxjs.ReplaySubject(1);
+loadModels().then(ok => { modelsReady$.next(ok); modelsReady$.complete(); });
 
 function dataUrlToImageData(dataUrl) {
   return new Promise(async (resolve, reject) => {
@@ -299,47 +300,106 @@ async function runPersonDetection(tensorInput) {
 //   3 = haiku (Claude API — most trusted)
 //   4 = user manual (explicit block/safe — absolute override)
 
-const { Subject, ReplaySubject, merge, from, of, EMPTY } = rxjs;
-const { filter, map, scan, distinctUntilChanged, tap, catchError, bufferTime, mergeMap } = rxjs.operators;
+const { Subject, ReplaySubject, merge, from, of, EMPTY, race, timer, forkJoin, defer } = rxjs;
+const { filter, map, tap, catchError, mergeMap, bufferWhen, share, debounceTime, take, switchMap, defaultIfEmpty } = rxjs.operators;
 
 const PRIORITY = { CACHE: 0, ML: 1, SERVER: 2, HAIKU: 3, USER: 4 };
+const PRIORITY_NAMES = ["cache", "ML", "server", "haiku", "user"];
+
+// State readiness — emits once loadState + loadLearningData complete.
+// All message handlers that depend on cloudCache/learning data gate on this.
+const stateReady$ = new ReplaySubject(1);
+
+// Debug timing — set to true for pipeline analysis
+let debugTiming = false;
+const pipelineT0 = performance.now();
+const debugEvents = []; // { time, msg } — retrievable via getDebugEvents message
+function debugLog(...args) {
+  if (!debugTiming) return;
+  const entry = `[SE:${Math.round(performance.now() - pipelineT0)}ms] ${args.join(" ")}`;
+  console.log(entry);
+  debugEvents.push({ time: Math.round(performance.now() - pipelineT0), msg: args.join(" ") });
+}
 
 // In-flight deduplication: url → { subject, subscription }
 const inFlightClassifications = new Map();
 
-// --- Batched server lookups ---
-// Individual pipelines push {url, resolve} into this subject.
-// bufferTime collects them, one HTTP batch call goes out, results fan back.
-const serverLookupSubject = new Subject();
+// --- Server readiness (emits once when auto-registration completes) ---
+const serverReady$ = new ReplaySubject(1);
 
-serverLookupSubject.pipe(
-  bufferTime(50, null, 50), // flush every 50ms or 50 items
+const SERVER_VOTE_THRESHOLD = 1; // min votes to trust server result (2 for prod, 1 for debug)
+
+// --- Batched server lookups via RxJS ---
+// Individual pipelines push {url, resolve} into serverLookup$.
+// buffer closes on: 100ms debounce OR 500ms max wait (whichever first).
+const serverLookup$ = new Subject();
+const serverLookupShared$ = serverLookup$.pipe(share());
+
+serverLookupShared$.pipe(
+  bufferWhen(() =>
+    // Close the buffer when items stop arriving (100ms quiet) OR after 500ms max
+    race(
+      serverLookupShared$.pipe(debounceTime(100), take(1)),
+      timer(500),
+    )
+  ),
   filter(batch => batch.length > 0),
-  mergeMap(async (batch) => {
-    try {
-      // Hash all URLs
-      const urlHashes = await Promise.all(
-        batch.map(async ({ url }) => ({ url, hash: await hashUrl(url) }))
-      );
-      const results = await serverBatchLookup(urlHashes);
-      // Fan results back to each waiting pipeline
-      for (const { url, resolve } of batch) {
-        const sv = results[url];
-        if (sv) {
-          const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
-          if (totalVotes >= 2) {
-            resolve({ containsWomen: sv.containsWomen, reason: "server", priority: PRIORITY.SERVER });
-            continue;
-          }
+  // Wait for server registration, then hash + lookup
+  mergeMap(batch => {
+    const t0 = performance.now();
+    debugLog("Server batch flush:", batch.length, "URLs");
+    // Race server readiness against a 2s timeout
+    return race(
+      serverReady$.pipe(take(1)),
+      timer(2000).pipe(map(() => false)),
+    ).pipe(
+      switchMap(ready => {
+        if (!ready || !serverEnabled || !serverToken) {
+          batch.forEach(({ result$ }) => { result$.next(null); result$.complete(); });
+          return EMPTY;
         }
-        resolve(null); // no trusted result
-      }
-    } catch {
-      // Server unreachable — resolve all with null
-      for (const { resolve } of batch) resolve(null);
-    }
+        // Hash all URLs in parallel
+        return forkJoin(batch.map(({ url }) =>
+          from(hashUrl(url)).pipe(map(hash => ({ url, hash })))
+        )).pipe(
+          // Batch lookup on server
+          switchMap(urlHashes => from(serverBatchLookup(urlHashes))),
+          // Fan results back to each waiting pipeline
+          tap(results => {
+            const hits = Object.keys(results).length;
+            debugLog("Server batch done:", Math.round(performance.now() - t0), "ms,",
+              hits, "hits /", batch.length, "requested");
+            for (const { url, result$ } of batch) {
+              const sv = results[url];
+              if (sv) {
+                const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
+                if (totalVotes >= SERVER_VOTE_THRESHOLD) {
+                  result$.next({ containsWomen: sv.containsWomen, reason: "server", priority: PRIORITY.SERVER });
+                  result$.complete();
+                  continue;
+                }
+              }
+              result$.next(null);
+              result$.complete();
+            }
+          }),
+          catchError(err => {
+            debugLog("Server batch error:", err.message);
+            batch.forEach(({ result$ }) => { result$.next(null); result$.complete(); });
+            return EMPTY;
+          }),
+        );
+      }),
+    );
   }),
 ).subscribe();
+
+// Enqueue a server lookup — returns an Observable that emits the result when the batch completes
+function enqueueServerLookup$(url) {
+  const result$ = new ReplaySubject(1);
+  serverLookup$.next({ url, result$ });
+  return result$.pipe(take(1));
+}
 
 // Notify all tabs of a classification update
 function notifyTabs(url, containsWomen, reason) {
@@ -358,9 +418,12 @@ function notifyTabs(url, containsWomen, reason) {
 // each source resolves, using scan to track the highest-priority result.
 function createClassificationPipeline(url, imageDataUrl) {
   const sources = [];
+  const shortUrl = url.substring(0, 60);
+  const pipeStart = performance.now();
 
   // Source 1: Local cache (sync)
   if (cloudCache[url]) {
+    debugLog("Pipeline CACHE HIT:", shortUrl);
     sources.push(of({
       containsWomen: cloudCache[url].containsWomen,
       reason: "cloud-cache",
@@ -370,32 +433,32 @@ function createClassificationPipeline(url, imageDataUrl) {
 
   // Source 2: Server check (batched — multiple images share one HTTP call)
   if (serverEnabled && serverToken) {
-    const server$ = from(new Promise(resolve => {
-      serverLookupSubject.next({ url, resolve });
-    })).pipe(
-      filter(r => r !== null),
-      catchError(() => EMPTY),
+    sources.push(
+      enqueueServerLookup$(url).pipe(filter(r => r !== null), catchError(() => EMPTY))
     );
-    sources.push(server$);
   }
 
   // Source 3: Local ML (async, CPU/WASM/WebGL)
-  // Shared via a ReplaySubject so Haiku (in "uncertain" mode) can wait for it
+  // Waits for models to load, then runs detection.
+  // Shared via a ReplaySubject so Haiku (in "uncertain" mode) can wait for it.
   const mlSubject = new ReplaySubject(1);
-  const ml$ = from(runMLDetection(url, imageDataUrl)).pipe(
-    map(r => ({
-      ...r,
-      reason: r.reason || "local",
-      priority: PRIORITY.ML,
-    })),
+  const ml$ = modelsReady$.pipe(
+    take(1),
+    switchMap(loaded => {
+      if (!loaded) return of({ containsWomen: true, reason: "models-not-loaded" });
+      // defer ensures the async detection runs only when subscribed
+      return defer(() => runMLInference(url, imageDataUrl));
+    }),
+    map(r => ({ ...r, reason: r.reason || "local", priority: PRIORITY.ML })),
     tap(mlResult => {
       mlSubject.next(mlResult);
       mlSubject.complete();
       // Side effect: submit ML result to server (non-blocking)
       if (serverEnabled && serverToken) {
-        hashUrl(url).then(hash => {
-          serverSubmitClassification(hash, mlResult.containsWomen, mlResult.reason, 0.8);
-        }).catch(() => {});
+        from(hashUrl(url)).pipe(
+          switchMap(hash => from(serverSubmitClassification(hash, mlResult.containsWomen, mlResult.reason, 0.8))),
+          catchError(() => EMPTY),
+        ).subscribe();
       }
     }),
     catchError(err => {
@@ -409,26 +472,22 @@ function createClassificationPipeline(url, imageDataUrl) {
   sources.push(ml$);
 
   // Source 4: Haiku (async API call — most trusted)
+  const mapHaikuResult = map(r => ({
+    containsWomen: r.containsWomen,
+    reason: "haiku",
+    priority: PRIORITY.HAIKU,
+    raw: r.raw,
+  }));
   if (anthropicApiKey && cloudMode !== "never") {
     if (cloudMode === "all") {
       // "all" mode: run Haiku in parallel with ML — don't wait
-      const haiku$ = from(handleCloudClassify(url, imageDataUrl, null)).pipe(
-        filter(r => r !== null),
-        map(r => ({
-          containsWomen: r.containsWomen,
-          reason: "haiku",
-          priority: PRIORITY.HAIKU,
-          raw: r.raw,
-        })),
-        catchError(() => EMPTY),
+      sources.push(
+        cloudClassify$(url, imageDataUrl, null).pipe(mapHaikuResult, catchError(() => EMPTY))
       );
-      sources.push(haiku$);
     } else {
       // "uncertain" mode: wait for ML, only call Haiku if ML isn't confident
-      const { switchMap } = rxjs.operators;
       const haiku$ = mlSubject.pipe(
         switchMap(mlResult => {
-          // Skip Haiku if ML is confident (KNN match or high classifier score)
           if (mlResult.knnDistance !== undefined && mlResult.knnDistance < 0.3) {
             cloudSavedCount++;
             return EMPTY;
@@ -437,20 +496,11 @@ function createClassificationPipeline(url, imageDataUrl) {
             cloudSavedCount++;
             return EMPTY;
           }
-          return from(handleCloudClassify(url, imageDataUrl, {
+          return cloudClassify$(url, imageDataUrl, {
             source: mlResult.reason,
             knnDistance: mlResult.knnDistance,
             classifierConfidence: mlResult.classifierConfidence,
-          })).pipe(
-            filter(r => r !== null),
-            map(r => ({
-              containsWomen: r.containsWomen,
-              reason: "haiku",
-              priority: PRIORITY.HAIKU,
-              raw: r.raw,
-            })),
-            catchError(() => EMPTY),
-          );
+          }).pipe(mapHaikuResult, catchError(() => EMPTY));
         }),
       );
       sources.push(haiku$);
@@ -466,8 +516,21 @@ function createClassificationPipeline(url, imageDataUrl) {
 // with the first result, but the pipeline continues running — later results
 // (server, Haiku) notify tabs via classificationOverride messages.
 function classifyImage(url, imageDataUrl) {
+  const shortUrl = url.substring(0, 60);
+
+  // User manual flags have absolute priority — skip the entire pipeline
+  if (manualBlocklist.includes(url)) {
+    debugLog("classifyImage USER BLOCK:", shortUrl);
+    return Promise.resolve({ containsWomen: true, reason: "user-block" });
+  }
+  if (manualSafelist.includes(url)) {
+    debugLog("classifyImage USER SAFE:", shortUrl);
+    return Promise.resolve({ containsWomen: false, reason: "user-safe" });
+  }
+
   // Instant cache hit — no pipeline needed
   if (cloudCache[url]) {
+    debugLog("classifyImage CACHE HIT:", shortUrl);
     return Promise.resolve({
       containsWomen: cloudCache[url].containsWomen,
       reason: "cloud-cache",
@@ -476,26 +539,26 @@ function classifyImage(url, imageDataUrl) {
 
   // Deduplication: if this URL is already being classified, wait for its first result
   if (inFlightClassifications.has(url)) {
-    const existing = inFlightClassifications.get(url);
-    return new Promise(resolve => {
-      const sub = existing.subject.subscribe(result => {
-        resolve(result);
-        sub.unsubscribe();
-      });
-    });
+    debugLog("classifyImage DEDUP:", shortUrl);
+    return rxjs.firstValueFrom(inFlightClassifications.get(url).subject);
   }
+
+  debugLog("classifyImage START:", shortUrl);
+  const classifyStart = performance.now();
 
   // Create a ReplaySubject so late subscribers (dedup) get the latest result
   const resultSubject = new ReplaySubject(1);
   let bestResult = null;   // highest-priority result seen so far
   let mlDescriptors = null; // saved from ML result for learning
-  let firstResolve = null;
-  const firstResultPromise = new Promise(resolve => { firstResolve = resolve; });
 
   const pipeline$ = createClassificationPipeline(url, imageDataUrl);
 
   const subscription = pipeline$.subscribe({
     next(result) {
+      const elapsed = Math.round(performance.now() - classifyStart);
+      debugLog(`  ${PRIORITY_NAMES[result.priority]}:`, result.containsWomen ? "BLOCK" : "SAFE",
+        `(${elapsed}ms)`, shortUrl);
+
       // Save ML descriptors for later learning
       if (result.priority === PRIORITY.ML && result.descriptors) {
         mlDescriptors = result.descriptors;
@@ -503,7 +566,10 @@ function classifyImage(url, imageDataUrl) {
 
       // Priority resolution: ignore results from lower-priority sources
       // that arrive after a higher-priority source already answered
-      if (bestResult && result.priority < bestResult.priority) return;
+      if (bestResult && result.priority < bestResult.priority) {
+        debugLog(`  IGNORED (${PRIORITY_NAMES[result.priority]} < ${PRIORITY_NAMES[bestResult.priority]})`, shortUrl);
+        return;
+      }
 
       const isFirst = !bestResult;
       const changed = bestResult && result.containsWomen !== bestResult.containsWomen;
@@ -514,8 +580,7 @@ function classifyImage(url, imageDataUrl) {
       resultSubject.next(result);
 
       if (isFirst) {
-        // First accepted emission — resolve the Promise returned to content.js
-        firstResolve(result);
+        debugLog("  FIRST RESULT:", PRIORITY_NAMES[result.priority], `(${elapsed}ms)`, shortUrl);
       } else if (changed) {
         // Higher-priority source disagrees — notify tabs to update the DOM
         console.log("[SE] Override:", result.reason, "says", result.containsWomen ? "block" : "safe",
@@ -529,35 +594,37 @@ function classifyImage(url, imageDataUrl) {
           feedHaikuIntoLearning(url, { containsWomen: result.containsWomen }, mlDescriptors);
         }
         if (serverEnabled && serverToken) {
-          hashUrl(url).then(hash => {
-            serverSubmitClassification(hash, result.containsWomen, "haiku", 0.95);
-          }).catch(() => {});
+          from(hashUrl(url)).pipe(
+            switchMap(hash => from(serverSubmitClassification(hash, result.containsWomen, "haiku", 0.95))),
+            catchError(() => EMPTY),
+          ).subscribe();
         }
       }
     },
     complete() {
       inFlightClassifications.delete(url);
+      // If no source emitted, push a strict-mode fallback before completing
+      if (!bestResult) resultSubject.next({ containsWomen: true, reason: "no-sources" });
       resultSubject.complete();
-      if (!bestResult) firstResolve({ containsWomen: true, reason: "no-sources" });
     },
     error(err) {
       console.error("[SE] Pipeline error:", err);
       inFlightClassifications.delete(url);
+      if (!bestResult) resultSubject.next({ containsWomen: true, reason: "error" });
       resultSubject.complete();
-      if (!bestResult) firstResolve({ containsWomen: true, reason: "error" });
     },
   });
 
   inFlightClassifications.set(url, { subject: resultSubject, subscription });
 
-  return firstResultPromise;
+  // Return the first emitted result (defaultIfEmpty for safety)
+  return rxjs.firstValueFrom(
+    resultSubject.pipe(defaultIfEmpty({ containsWomen: true, reason: "no-sources" }))
+  );
 }
 
-async function runMLDetection(url, imageDataUrl) {
-  await modelsReadyPromise;
-  if (!modelsLoaded) {
-    return { containsWomen: true, reason: "models-not-loaded" };
-  }
+// Core ML inference — models are guaranteed loaded by the pipeline's modelsReady$ gate
+async function runMLInference(url, imageDataUrl) {
 
   let imageData;
   try {
@@ -619,7 +686,10 @@ async function runMLDetection(url, imageDataUrl) {
       let flagBlock = false;
       let flagSafe = false;
 
-      if (det.gender === "female" && det.genderProbability > 0.6) {
+      // Strict mode: only SHOW if confidently male (>0.65).
+      // Block if female, uncertain, or gender data missing.
+      const isConfidentlyMale = det.gender === "male" && det.genderProbability >= 0.65;
+      if (!isConfidentlyMale) {
         flagBlock = true;
       }
 
@@ -652,8 +722,8 @@ async function runMLDetection(url, imageDataUrl) {
 }
 
 async function extractDescriptorsFromDataUrl(imageDataUrl) {
-  await modelsReadyPromise;
-  if (!modelsLoaded) return [];
+  const loaded = await rxjs.firstValueFrom(modelsReady$);
+  if (!loaded) return [];
   try {
     const imageData = await dataUrlToImageData(imageDataUrl);
     const tensor = imageDataToTensor(imageData);
@@ -714,11 +784,11 @@ async function fetchImageAsDataUrl(url) {
 // --- Cloud API: Claude Haiku classification ---
 
 const API_RATE_LIMIT = 10;
-let activeApiCalls = 0;
-const apiQueue = [];
+// RxJS-based semaphore: pending Haiku calls wait on Subjects released by completed calls
+const apiSemaphore = { active: 0, queue: [] };
 
 // In-flight tracking: prevents sending the same URL twice concurrently
-const inFlightUrls = new Map(); // url → Promise
+const inFlightUrls = new Map(); // url → Observable (shared)
 
 async function resizeImageDataUrl(dataUrl, maxDim) {
   const response = await fetch(dataUrl);
@@ -809,76 +879,90 @@ async function classifyWithHaiku(imageDataUrl) {
   }
 }
 
-async function rateLimitedHaikuCall(imageDataUrl) {
-  if (activeApiCalls >= API_RATE_LIMIT) {
-    await new Promise(resolve => apiQueue.push(resolve));
+// Acquire a semaphore slot — returns an Observable that emits once a slot is free
+function acquireApiSlot$() {
+  if (apiSemaphore.active < API_RATE_LIMIT) {
+    apiSemaphore.active++;
+    return of(true);
   }
-  activeApiCalls++;
-  try {
-    return await classifyWithHaiku(imageDataUrl);
-  } finally {
-    activeApiCalls--;
-    if (apiQueue.length > 0) apiQueue.shift()();
+  const slot$ = new ReplaySubject(1);
+  apiSemaphore.queue.push(slot$);
+  return slot$.pipe(take(1));
+}
+
+function releaseApiSlot() {
+  apiSemaphore.active--;
+  if (apiSemaphore.queue.length > 0) {
+    const next = apiSemaphore.queue.shift();
+    apiSemaphore.active++;
+    next.next(true);
+    next.complete();
   }
+}
+
+// Rate-limited Haiku call — waits for semaphore slot, runs classification, releases slot
+function rateLimitedHaikuCall$(imageDataUrl) {
+  return acquireApiSlot$().pipe(
+    switchMap(() => defer(() => classifyWithHaiku(imageDataUrl))),
+    tap({ complete: releaseApiSlot, error: releaseApiSlot }),
+  );
 }
 
 // Process a cloud classification request. Deduplicates by URL.
 // Called from the RxJS pipeline — server check is handled separately there.
-async function handleCloudClassify(imageUrl, imageDataUrl, localResult) {
+// Returns an Observable that emits one Haiku result (or EMPTY if skipped).
+// Deduplicates in-flight requests via inFlightUrls.
+function cloudClassify$(imageUrl, imageDataUrl, localResult) {
   // Check cloud cache — never send the same URL twice
   if (cloudCache[imageUrl]) {
     cloudSavedCount++;
-    return { ...cloudCache[imageUrl], source: "cloud-cache" };
+    return of({ ...cloudCache[imageUrl], source: "cloud-cache" });
   }
 
-  // Check if this URL is already in-flight
+  // Dedup: if this URL is already in-flight, share the existing observable
   if (inFlightUrls.has(imageUrl)) {
     return inFlightUrls.get(imageUrl);
   }
 
   // In "uncertain" mode, skip if local is confident
   if (cloudMode === "uncertain" && localResult) {
-    if (localResult.source === "user") return null;
+    if (localResult.source === "user") return EMPTY;
     if (localResult.knnDistance !== undefined && localResult.knnDistance < 0.3) {
       cloudSavedCount++;
-      return null;
+      return EMPTY;
     }
     if (localResult.classifierConfidence !== undefined && localResult.classifierConfidence > 0.9) {
       cloudSavedCount++;
-      return null;
+      return EMPTY;
     }
   }
 
-  // Call Haiku API (rate-limited, deduplicated via in-flight map)
-  const promise = (async () => {
-    const haikuResult = await rateLimitedHaikuCall(imageDataUrl);
-    if (!haikuResult) return null;
-
-    // Cache the result
-    cloudCache[imageUrl] = {
-      containsWomen: haikuResult.containsWomen,
-      timestamp: Date.now(),
-    };
-    // Trim cache if too large
-    const keys = Object.keys(cloudCache);
-    if (keys.length > MAX_CLOUD_CACHE) {
-      const sorted = keys.sort((a, b) => cloudCache[a].timestamp - cloudCache[b].timestamp);
-      for (let i = 0; i < sorted.length - MAX_CLOUD_CACHE; i++) {
-        delete cloudCache[sorted[i]];
+  // Rate-limited Haiku call → cache result → emit
+  const haiku$ = rateLimitedHaikuCall$(imageDataUrl).pipe(
+    filter(r => r !== null),
+    tap(haikuResult => {
+      // Cache the result
+      cloudCache[imageUrl] = {
+        containsWomen: haikuResult.containsWomen,
+        timestamp: Date.now(),
+      };
+      // Trim cache if too large
+      const keys = Object.keys(cloudCache);
+      if (keys.length > MAX_CLOUD_CACHE) {
+        const sorted = keys.sort((a, b) => cloudCache[a].timestamp - cloudCache[b].timestamp);
+        for (let i = 0; i < sorted.length - MAX_CLOUD_CACHE; i++) {
+          delete cloudCache[sorted[i]];
+        }
       }
-    }
-    saveState();
+      saveState();
+      console.log("[Shmirat Eynaim] Haiku:", haikuResult.raw, "for", imageUrl.substring(0, 60));
+    }),
+    tap({ complete: () => inFlightUrls.delete(imageUrl), error: () => inFlightUrls.delete(imageUrl) }),
+    share(), // share among dedup subscribers
+  );
 
-    console.log("[Shmirat Eynaim] Haiku:", haikuResult.raw, "for", imageUrl.substring(0, 60));
-    return haikuResult;
-  })();
-
-  inFlightUrls.set(imageUrl, promise);
-  try {
-    return await promise;
-  } finally {
-    inFlightUrls.delete(imageUrl);
-  }
+  inFlightUrls.set(imageUrl, haiku$);
+  return haiku$;
 }
 
 // Feed Haiku result into the learning system
@@ -1102,6 +1186,8 @@ if (menusAPI) {
         manualBlocklist.push(imageUrl);
       }
       manualSafelist = manualSafelist.filter(u => u !== imageUrl);
+      // Update cloudCache so checkCache returns block on next page load
+      cloudCache[imageUrl] = { containsWomen: true, timestamp: Date.now() };
       await saveLearningData();
       showTemporaryBadge("✓", "#2ecc71");
       // Tell content script to hide + extract descriptors
@@ -1115,6 +1201,8 @@ if (menusAPI) {
         manualSafelist.push(imageUrl);
       }
       manualBlocklist = manualBlocklist.filter(u => u !== imageUrl);
+      // Update cloudCache so checkCache returns safe on next page load
+      cloudCache[imageUrl] = { containsWomen: false, timestamp: Date.now() };
       await saveLearningData();
       // Tell content script to show + extract descriptors
       if (tabId) {
@@ -1134,6 +1222,17 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       // Content script reports the image URL under the cursor before context menu opens
       lastContextMenuImageUrl = msg.url || null;
       return Promise.resolve({ ok: true });
+    }
+
+    case "enableDebugTiming": {
+      debugTiming = msg.enabled !== false;
+      debugEvents.length = 0; // clear previous events
+      console.log("[SE] Debug timing:", debugTiming ? "ON" : "OFF");
+      return Promise.resolve({ ok: true });
+    }
+
+    case "getDebugEvents": {
+      return Promise.resolve(debugEvents);
     }
 
     case "getDebugStatus":
@@ -1201,17 +1300,78 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       return fetchImageAsDataUrl(msg.url);
     }
 
-    case "checkCache": {
-      // Fast cache check — no pixel data needed
-      const url = msg.url;
-      if (cloudCache[url]) {
-        return Promise.resolve({
-          hit: true,
-          containsWomen: cloudCache[url].containsWomen,
-          reason: "cloud-cache",
-        });
+    case "prefetchServer": {
+      // Batch-query the server for all URLs at once, populating cloudCache.
+      // Called by content.js discoverImages before individual classifyImage calls.
+      const urls = msg.urls || [];
+      if (urls.length === 0) {
+        return Promise.resolve({ ok: true, cached: 0 });
       }
-      return Promise.resolve({ hit: false });
+      // Wait for state + server readiness (race against 2s timeout for server)
+      return rxjs.firstValueFrom(stateReady$.pipe(
+        take(1),
+        switchMap(() => race(
+          serverReady$.pipe(take(1)),
+          timer(2000).pipe(map(() => false)),
+        )),
+      ).pipe(
+        switchMap(ready => {
+          if (!ready || !serverEnabled || !serverToken) {
+            return of({ ok: true, cached: 0 });
+          }
+          const t0 = performance.now();
+          const uncached = urls.filter(u => !cloudCache[u]);
+          if (uncached.length === 0) {
+            debugLog("prefetchServer: all cached");
+            return of({ ok: true, cached: 0 });
+          }
+          debugLog("prefetchServer:", urls.length, "URLs");
+          // Hash all URLs, then batch lookup, then populate cache
+          return forkJoin(
+            uncached.map(url => from(hashUrl(url)).pipe(map(hash => ({ url, hash }))))
+          ).pipe(
+            switchMap(urlHashes => from(serverBatchLookup(urlHashes))),
+            map(results => {
+              let cached = 0;
+              for (const url of uncached) {
+                const sv = results[url];
+                if (sv) {
+                  const totalVotes = (sv.voteBlock || 0) + (sv.voteSafe || 0);
+                  if (totalVotes >= SERVER_VOTE_THRESHOLD) {
+                    cloudCache[url] = { containsWomen: sv.containsWomen, timestamp: Date.now() };
+                    cached++;
+                  }
+                }
+              }
+              debugLog("prefetchServer done:", Math.round(performance.now() - t0), "ms,",
+                cached, "cached /", uncached.length, "queried");
+              return { ok: true, cached };
+            }),
+          );
+        }),
+        catchError(() => of({ ok: true, cached: 0 })),
+      ));
+    }
+
+    case "checkCache": {
+      // Fast cache check — waits for state to load, then checks cloudCache
+      // User manual flags take absolute priority over any cache
+      const url = msg.url;
+      return rxjs.firstValueFrom(stateReady$.pipe(
+        take(1),
+        map(() => {
+          if (manualBlocklist.includes(url)) {
+            return { hit: true, containsWomen: true, reason: "user-block" };
+          }
+          if (manualSafelist.includes(url)) {
+            return { hit: true, containsWomen: false, reason: "user-safe" };
+          }
+          if (cloudCache[url]) {
+            return { hit: true, containsWomen: cloudCache[url].containsWomen, reason: "cloud-cache" };
+          }
+          return { hit: false };
+        }),
+      ));
     }
 
     case "classifyImage": {
@@ -1247,6 +1407,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       const { url, descriptors } = msg;
       if (!manualBlocklist.includes(url)) manualBlocklist.push(url);
       manualSafelist = manualSafelist.filter(u => u !== url);
+      cloudCache[url] = { containsWomen: true, timestamp: Date.now() };
       const now = Date.now();
       for (const descriptor of descriptors) {
         knownFaces.push({ descriptor, url, timestamp: now });
@@ -1264,6 +1425,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       const { url: safeUrl, descriptors: safeDescriptors } = msg;
       if (!manualSafelist.includes(safeUrl)) manualSafelist.push(safeUrl);
       manualBlocklist = manualBlocklist.filter(u => u !== safeUrl);
+      cloudCache[safeUrl] = { containsWomen: false, timestamp: Date.now() };
       const now = Date.now();
       for (const descriptor of safeDescriptors) {
         knownSafeFaces.push({ descriptor, url: safeUrl, timestamp: now });
@@ -1280,6 +1442,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       const url = msg.url;
       if (!manualBlocklist.includes(url)) manualBlocklist.push(url);
       manualSafelist = manualSafelist.filter(u => u !== url);
+      cloudCache[url] = { containsWomen: true, timestamp: Date.now() };
       saveLearningData();
       const tabId = sender.tab ? sender.tab.id : null;
       if (tabId) {
@@ -1292,6 +1455,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       const url = msg.url;
       if (!manualSafelist.includes(url)) manualSafelist.push(url);
       manualBlocklist = manualBlocklist.filter(u => u !== url);
+      cloudCache[url] = { containsWomen: false, timestamp: Date.now() };
       saveLearningData();
       const tabId = sender.tab ? sender.tab.id : null;
       if (tabId) {
@@ -1347,21 +1511,23 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     case "serverBatchLookup": {
       // msg.urls: string[]
       const urls = msg.urls || [];
-      return (async () => {
-        const urlHashes = await Promise.all(
-          urls.map(async (url) => ({ url, hash: await hashUrl(url) }))
-        );
-        return serverBatchLookup(urlHashes);
-      })();
+      return rxjs.firstValueFrom(
+        forkJoin(urls.map(url => from(hashUrl(url)).pipe(map(hash => ({ url, hash }))))).pipe(
+          switchMap(urlHashes => from(serverBatchLookup(urlHashes))),
+          defaultIfEmpty({}),
+        )
+      );
     }
 
     case "serverSubmitClassification": {
       const { url: classUrl, containsWomen: cw, source: src, confidence: conf } = msg;
-      return (async () => {
-        const hash = await hashUrl(classUrl);
-        await serverSubmitClassification(hash, cw, src, conf);
-        return { success: true };
-      })();
+      return rxjs.firstValueFrom(
+        from(hashUrl(classUrl)).pipe(
+          switchMap(hash => from(serverSubmitClassification(hash, cw, src, conf))),
+          map(() => ({ success: true })),
+          defaultIfEmpty({ success: true }),
+        )
+      );
     }
 
     case "serverSubmitDescriptor": {
@@ -1442,14 +1608,19 @@ try {
   try {
     await loadState();
     await loadLearningData();
+    stateReady$.next(true); stateReady$.complete();
     updateBadge();
     // Auto-register with the shared server if we don't have a token yet
     if (!serverToken) {
-      serverAutoRegister().catch(err => {
-        console.warn("[Shmirat Eynaim] Auto-register failed:", err.message);
-      });
+      serverAutoRegister()
+        .then(() => { serverReady$.next(true); serverReady$.complete(); })
+        .catch(err => {
+          console.warn("[Shmirat Eynaim] Auto-register failed:", err.message);
+          serverReady$.next(false); serverReady$.complete();
+        });
     } else {
       serverEnabled = true;
+      serverReady$.next(true); serverReady$.complete();
     }
     console.log("[Shmirat Eynaim] Background script initialized");
   } catch (err) {

@@ -184,7 +184,16 @@
     scheduleUpdate(el, "block", reason);
   }
 
+  // --- Server prefetch tracking ---
+  // discoverImages fires a prefetch for all URLs; analyzeElement waits for it
+  // so cache is populated before checking.
+  let activePrefetch = Promise.resolve();
+
   // --- Analyze a single image element ---
+
+  // Overall timeout for the entire analysis (background may be blocked by WASM ML).
+  // If any sendMessage call hangs, this ensures the queue slot is freed.
+  const ANALYZE_TIMEOUT = 45_000;
 
   async function analyzeElement(el) {
     const src = getImageSrc(el);
@@ -199,6 +208,33 @@
       scannedCount++;
       return;
     }
+
+    // Wrap the async background calls in an overall timeout.
+    // When the background page is busy with WASM ML, sendMessage calls hang
+    // indefinitely. This prevents queue starvation.
+    let timeoutId;
+    try {
+      await Promise.race([
+        analyzeElementAsync(el, src),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error("analyze_timeout")), ANALYZE_TIMEOUT);
+        }),
+      ]);
+      clearTimeout(timeoutId);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      // Only apply timeout block if not already resolved by analyzeElementAsync
+      if (!el.classList.contains("shmirat-eynaim-safe") && !el.classList.contains("shmirat-eynaim-blocked")) {
+        console.warn("[SE] Analyze timeout:", src.substring(0, 60));
+        markBlocked(el, "timeout");
+        scannedCount++;
+      }
+    }
+  }
+
+  async function analyzeElementAsync(el, src) {
+    // Wait for any active server prefetch to complete first
+    await activePrefetch;
 
     // Phase 1: Check background caches (cheap — no pixel data sent)
     try {
@@ -272,8 +308,21 @@
     }
 
     if (el.tagName === "IMG" && !el.complete) {
+      // For lazy-loaded images hidden by our CSS, the browser may never trigger
+      // the load event (opacity:0 → treated as offscreen → lazy load skipped).
+      // Force eager loading so the image actually loads, then analyze it.
+      if (el.loading === "lazy") {
+        el.loading = "eager";
+      }
       el.addEventListener("load", () => handleLoadedImage(el), { once: true });
       el.addEventListener("error", () => { markBlocked(el); scannedCount++; }, { once: true });
+      // Fallback: if load/error never fires within 15s, analyze via background fetch
+      setTimeout(() => {
+        if (el.classList.contains("shmirat-eynaim-pending")) {
+          console.log("[SE] Lazy image load timeout, using bg fetch:", (el.src || "").substring(0, 60));
+          handleLoadedImage(el);
+        }
+      }, 15000);
       return;
     }
     handleLoadedImage(el);
@@ -292,19 +341,38 @@
   function discoverImages(root) {
     if (!root || !root.querySelectorAll) return;
 
+    const pendingElements = [];
+
     for (const img of root.querySelectorAll("img")) {
-      if (markPending(img)) processImage(img);
+      if (markPending(img)) pendingElements.push(img);
     }
     for (const el of root.querySelectorAll("[style*='background']")) {
       if (el.tagName === "IMG") continue;
       const bg = el.style.backgroundImage;
       if (bg && bg !== "none" && bg.includes("url(")) {
-        if (markPending(el)) processImage(el);
+        if (markPending(el)) pendingElements.push(el);
       }
     }
     for (const video of root.querySelectorAll("video[poster]")) {
-      if (markPending(video)) processImage(video);
+      if (markPending(video)) pendingElements.push(video);
     }
+
+    // Prefetch: send all new URLs to background so it can batch-query the server
+    // in one HTTP call. analyzeElement awaits activePrefetch before checking cache.
+    const newUrls = [];
+    for (const el of pendingElements) {
+      const src = getImageSrc(el);
+      if (src && !urlCache.has(src) && !manualBlocklist.has(src) && !manualSafelist.has(src)) {
+        newUrls.push(src);
+      }
+    }
+    if (newUrls.length > 0) {
+      activePrefetch = browser.runtime.sendMessage({
+        type: "prefetchServer", urls: newUrls,
+      }).catch(() => {});
+    }
+
+    for (const el of pendingElements) processImage(el);
   }
 
   // --- MutationObserver ---
@@ -316,7 +384,39 @@
     const batch = mutationBatch;
     mutationBatch = [];
     mutationTimer = null;
-    for (const el of batch) discoverImages(el);
+    // Discover images in all mutated nodes, collecting elements first
+    const allPending = [];
+    for (const el of batch) {
+      if (!el || !el.querySelectorAll) continue;
+      for (const img of el.querySelectorAll("img")) {
+        if (markPending(img)) allPending.push(img);
+      }
+      for (const bgEl of el.querySelectorAll("[style*='background']")) {
+        if (bgEl.tagName === "IMG") continue;
+        const bg = bgEl.style.backgroundImage;
+        if (bg && bg !== "none" && bg.includes("url(")) {
+          if (markPending(bgEl)) allPending.push(bgEl);
+        }
+      }
+      for (const video of el.querySelectorAll("video[poster]")) {
+        if (markPending(video)) allPending.push(video);
+      }
+    }
+    if (allPending.length === 0) return;
+    // Single prefetch for all mutation-discovered URLs
+    const newUrls = [];
+    for (const el of allPending) {
+      const src = getImageSrc(el);
+      if (src && !urlCache.has(src) && !manualBlocklist.has(src) && !manualSafelist.has(src)) {
+        newUrls.push(src);
+      }
+    }
+    if (newUrls.length > 0) {
+      activePrefetch = browser.runtime.sendMessage({
+        type: "prefetchServer", urls: newUrls,
+      }).catch(() => {});
+    }
+    for (const el of allPending) processImage(el);
   }
 
   const observer = new MutationObserver((mutations) => {
@@ -326,8 +426,19 @@
       }
       if (mutation.type === "attributes" && mutation.target.nodeType === Node.ELEMENT_NODE) {
         const el = mutation.target;
-        el.classList.remove("shmirat-eynaim-safe", "shmirat-eynaim-blocked");
-        if (markPending(el)) processImage(el);
+        if (mutation.attributeName === "style") {
+          // Style change: only process if element has a background-image and isn't already handled
+          const bg = el.style.backgroundImage;
+          if (bg && bg !== "none" && bg.includes("url(") &&
+              !el.classList.contains("shmirat-eynaim-safe") &&
+              !el.classList.contains("shmirat-eynaim-blocked") &&
+              !el.classList.contains("shmirat-eynaim-pending")) {
+            if (markPending(el)) processImage(el);
+          }
+        } else {
+          el.classList.remove("shmirat-eynaim-safe", "shmirat-eynaim-blocked");
+          if (markPending(el)) processImage(el);
+        }
       }
     }
     if (!mutationTimer && mutationBatch.length > 0) {
@@ -337,7 +448,7 @@
 
   observer.observe(document.documentElement, {
     childList: true, subtree: true, attributes: true,
-    attributeFilter: ["src", "srcset", "data-src", "data-original", "data-lazy"],
+    attributeFilter: ["src", "srcset", "data-src", "data-original", "data-lazy", "style"],
   });
 
   // --- Find images by URL ---
@@ -460,6 +571,8 @@
     // Background notifies us that Haiku overrode a classification
     if (msg.type === "classificationOverride" && msg.url) {
       const { url, containsWomen, reason } = msg;
+      // Never override user manual flags — they have absolute priority
+      if (manualBlocklist.has(url) || manualSafelist.has(url)) return;
       urlCache.set(url, { containsWomen, reason });
       const elements = findImagesByUrl(url);
       for (const el of elements) {
@@ -507,6 +620,18 @@
       browser.runtime.sendMessage({ type: "contextMenuImage", url: src }).catch(() => {});
     }
   }, true);
+
+  // --- Debug relay: page world → content script → background ---
+  // Allows Playwright's page.evaluate to communicate with background.js
+  window.addEventListener("message", async (event) => {
+    if (event.source !== window || !event.data || event.data.channel !== "se-debug") return;
+    try {
+      const result = await browser.runtime.sendMessage(event.data.payload);
+      window.postMessage({ channel: "se-debug-reply", id: event.data.id, result }, "*");
+    } catch (err) {
+      window.postMessage({ channel: "se-debug-reply", id: event.data.id, error: err.message }, "*");
+    }
+  });
 
   // --- Initial sweep ---
 
