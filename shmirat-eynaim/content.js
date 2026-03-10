@@ -72,6 +72,15 @@
       const imgChild = el.querySelector("image[href], image[xlink\\:href]");
       if (imgChild) return imgChild.getAttribute("href") || imgChild.getAttributeNS("http://www.w3.org/1999/xlink", "href") || "";
     }
+    // Read inline style first — CSS rules (like our own "background-image: none
+    // !important" on .shmirat-eynaim-pending) can override getComputedStyle but
+    // never change el.style which reflects the HTML attribute directly.
+    const inlineBg = el.style.backgroundImage;
+    if (inlineBg && inlineBg !== "none" && inlineBg.includes("url(")) {
+      const match = inlineBg.match(/url\(["']?(.+?)["']?\)/);
+      if (match) return match[1];
+    }
+    // Fallback to computed style for non-inline backgrounds (set via CSS class)
     const bg = getComputedStyle(el).backgroundImage;
     if (bg && bg !== "none") {
       const match = bg.match(/url\(["']?(.+?)["']?\)/);
