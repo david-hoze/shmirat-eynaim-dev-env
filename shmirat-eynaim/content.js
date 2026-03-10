@@ -306,6 +306,16 @@
   function processImage(el) {
     if (shouldSkip(el)) { markSafe(el); return; }
 
+    // Track current background-image URL so MutationObserver can detect swaps
+    // (e.g. Taboola replaces placeholder data URI with real image URL)
+    if (el.tagName !== "IMG" && el.tagName !== "VIDEO") {
+      const bg = el.style.backgroundImage;
+      if (bg && bg.includes("url(")) {
+        const m = bg.match(/url\(["']?(.+?)["']?\)/);
+        if (m) el.dataset.seLastBgUrl = m[1];
+      }
+    }
+
     // Fast-path: resolve from caches synchronously without entering the async queue
     const src = getImageSrc(el);
     if (src) {
@@ -406,6 +416,23 @@
     const allPending = [];
     for (const el of batch) {
       if (!el || !el.querySelectorAll) continue;
+
+      // Check the element itself (querySelectorAll only matches descendants)
+      if (el.tagName === "IMG") {
+        if (markPending(el)) allPending.push(el);
+      } else if ((el.tagName === "svg" || el.tagName === "SVG") &&
+                 el.querySelector("image[href], image[xlink\\:href]")) {
+        if (markPending(el)) allPending.push(el);
+      } else if (el.tagName === "VIDEO" && el.hasAttribute("poster")) {
+        if (markPending(el)) allPending.push(el);
+      } else if (el.tagName !== "IMG") {
+        const bg = el.style.backgroundImage;
+        if (bg && bg !== "none" && bg.includes("url(")) {
+          if (markPending(el)) allPending.push(el);
+        }
+      }
+
+      // Check descendants
       for (const img of el.querySelectorAll("img")) {
         if (markPending(img)) allPending.push(img);
       }
@@ -422,12 +449,6 @@
       for (const svg of el.querySelectorAll("svg")) {
         if (svg.querySelector("image[href], image[xlink\\:href]")) {
           if (markPending(svg)) allPending.push(svg);
-        }
-      }
-      // Also check if the mutated element itself is an SVG ad container
-      if (el.tagName === "svg" || el.tagName === "SVG") {
-        if (el.querySelector("image[href], image[xlink\\:href]")) {
-          if (markPending(el)) allPending.push(el);
         }
       }
     }
@@ -456,13 +477,19 @@
       if (mutation.type === "attributes" && mutation.target.nodeType === Node.ELEMENT_NODE) {
         const el = mutation.target;
         if (mutation.attributeName === "style") {
-          // Style change: only process if element has a background-image and isn't already handled
+          // Style change: check if background-image URL changed
           const bg = el.style.backgroundImage;
-          if (bg && bg !== "none" && bg.includes("url(") &&
-              !el.classList.contains("shmirat-eynaim-safe") &&
-              !el.classList.contains("shmirat-eynaim-blocked") &&
-              !el.classList.contains("shmirat-eynaim-pending")) {
-            if (markPending(el)) processImage(el);
+          if (bg && bg !== "none" && bg.includes("url(")) {
+            // Extract new URL from background-image
+            const urlMatch = bg.match(/url\(["']?(.+?)["']?\)/);
+            const newUrl = urlMatch ? urlMatch[1] : "";
+            const prevUrl = el.dataset.seLastBgUrl || "";
+            // Re-analyze if URL changed (e.g. Taboola swaps placeholder → real image)
+            if (newUrl && newUrl !== prevUrl) {
+              el.dataset.seLastBgUrl = newUrl;
+              el.classList.remove("shmirat-eynaim-safe", "shmirat-eynaim-blocked");
+              if (markPending(el)) processImage(el);
+            }
           }
         } else {
           el.classList.remove("shmirat-eynaim-safe", "shmirat-eynaim-blocked");
