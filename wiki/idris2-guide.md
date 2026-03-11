@@ -3,24 +3,25 @@
 ## Table of Contents
 
 1. [What is Idris 2?](#what-is-idris-2)
-2. [Why Idris 2 for Browser Extensions?](#why-idris-2-for-browser-extensions)
-3. [Installing on Windows](#installing-on-windows)
-4. [The JavaScript Backend](#the-javascript-backend)
-5. [FFI (Foreign Function Interface)](#ffi-foreign-function-interface)
-6. [Handling Async/Promises](#handling-asyncpromises)
-7. [Callbacks and Event Handlers](#callbacks-and-event-handlers)
-8. [Wrapping RxJS](#wrapping-rxjs)
-9. [Dependent Types for DOM Safety](#dependent-types-for-dom-safety)
-10. [The CSS-JS Coupling Bug and How Idris Prevents It](#the-css-js-coupling-bug-and-how-idris-prevents-it)
-11. [Generated JS Output](#generated-js-output)
-12. [Limitations and Tradeoffs](#limitations-and-tradeoffs)
-13. [Comparison with Other Languages](#comparison-with-other-languages)
-14. [Resources](#resources)
-15. [Compilation Errors We Encountered](#compilation-errors-we-encountered-and-how-to-fix-them)
-16. [Gotchas and Pitfalls](#gotchas-and-pitfalls)
-17. [Testing in Idris2](#testing-in-idris2---cg-node)
-18. [Practical FFI Patterns](#practical-ffi-patterns)
-19. [Build Commands Reference](#build-commands-reference)
+2. [Progressive Idris (Type Inference)](#progressive-idris-type-inference-for-unannotated-definitions)
+3. [Why Idris 2 for Browser Extensions?](#why-idris-2-for-browser-extensions)
+4. [Installing on Windows](#installing-on-windows)
+5. [The JavaScript Backend](#the-javascript-backend)
+6. [FFI (Foreign Function Interface)](#ffi-foreign-function-interface)
+7. [Handling Async/Promises](#handling-asyncpromises)
+8. [Callbacks and Event Handlers](#callbacks-and-event-handlers)
+9. [Wrapping RxJS](#wrapping-rxjs)
+10. [Dependent Types for DOM Safety](#dependent-types-for-dom-safety)
+11. [The CSS-JS Coupling Bug and How Idris Prevents It](#the-css-js-coupling-bug-and-how-idris-prevents-it)
+12. [Generated JS Output](#generated-js-output)
+13. [Limitations and Tradeoffs](#limitations-and-tradeoffs)
+14. [Comparison with Other Languages](#comparison-with-other-languages)
+15. [Resources](#resources)
+16. [Compilation Errors We Encountered](#compilation-errors-we-encountered-and-how-to-fix-them)
+17. [Gotchas and Pitfalls](#gotchas-and-pitfalls)
+18. [Testing in Idris2](#testing-in-idris2---cg-node)
+19. [Practical FFI Patterns](#practical-ffi-patterns)
+20. [Build Commands Reference](#build-commands-reference)
 
 ---
 
@@ -35,6 +36,96 @@ Idris 2 is a purely functional programming language with **dependent types**. De
 - **License**: BSD-3-Clause
 
 Idris 2 is a research language that's actively maintained but has a small ecosystem. No browser extension has ever been built in Idris 2 — the `shmirat-eynaim-idris/` project in this repo is (as far as we know) the first attempt.
+
+---
+
+## Progressive Idris (Type Inference for Unannotated Definitions)
+
+Our custom Idris2 build (branch `progressive-stage1` on `fork`, david-hoze/Idris2)
+includes **progressive type inference** — you can write function definitions
+without type annotations and the compiler will infer types.
+
+### Basic Usage
+
+```idris
+-- No type annotation needed:
+add x y = x + y          -- inferred: Integer -> Integer -> Integer
+id' x = x                -- inferred: {0 a : Type} -> a -> a
+const' x y = x           -- inferred: {0 a : Type} -> {0 b : Type} -> a -> b -> a
+myLength [] = 0
+myLength (_ :: xs) = 1 + myLength xs
+                          -- inferred: {0 a : Type} -> List a -> Integer
+```
+
+### Type Generalization
+
+When a function's argument or return type can't be determined from the definition
+(no operator constraints, no constructor patterns), the type is **generalized** —
+unsolved type variables become implicit type parameters. This means functions like
+`id' x = x` are truly polymorphic, not monomorphic `Integer -> Integer`.
+
+### `--show-inferred-types` Flag
+
+Use `--show-inferred-types` with `--check` to see what types the compiler inferred:
+
+```bash
+idris2 --show-inferred-types --check myfile.idr
+# Output:
+# add : Integer -> Integer -> Integer
+# id' : a -> a
+```
+
+### What Works
+
+- Simple aliases: `add x y = x + y`, `double x = x + x`
+- Identity/const: `id x = x`, `const x y = x`
+- Constructor patterns: `myNot True = False; myNot False = True`
+- List patterns: `myLength [] = 0; myLength (_ :: xs) = 1 + myLength xs`
+- Recursive functions: `factorial 0 = 1; factorial n = n * factorial (n - 1)`
+- Case expressions, let bindings, where clauses
+- String literal patterns: `greet "world" = "Hello, World!"; greet n = "Hello, " ++ n`
+- Polymorphic usage: `id' 42` and `id' "hello"` in the same program
+
+### Known Limitations
+
+- **Higher-order functions**: `apply f x = f x` and `myMap f [] = []` fail because
+  the compiler can't infer that `f` is a function type without HM-style unification
+- **Pair patterns**: `myFst (x, _) = x` has an elaboration ordering issue
+  (`unifyBothApps` picks the wrong hole orientation)
+- **Typeclass operations on unresolved types**: Functions using `<`, `>`, `compare`
+  fail because `Ord` search runs before the argument type is resolved
+- **Typeclass generalization**: `add x y = x + y` infers `Integer -> Integer -> Integer`
+  rather than `Num a => a -> a -> a` because the Num constraint is eagerly defaulted
+
+### How It Works (Implementation Overview)
+
+The progressive inference pipeline has three stages:
+
+**Stage 1 — Type Synthesis** (`synthTypeFromPatterns` in ProcessDef.idr):
+When a definition has no type annotation, the compiler scans LHS patterns for
+constructor heads (e.g., `True`, `[]`, `::`) to determine argument types, and
+scans the RHS for return type hints. Numeric literals default to `Integer`.
+Remaining unknowns become metavariable holes marked with a `constSolvable` flag.
+
+**Stage 2 — Elaboration**: Standard Idris 2 clause checking runs. The unifier
+resolves metavariables where possible. The `constSolvable` flag allows the
+unifier to solve certain holes as constant functions when pattern matching
+substitutes constructors into metavar arguments (via `tryConstantSolve` in
+Unify.idr). This is scoped to only synthesis-created holes to avoid breaking
+the 624 existing tests.
+
+**Stage 3 — Generalization** (`generaliseType` in ProcessDef.idr):
+After elaboration AND runtime case tree compilation, any remaining unsolved
+metavariables in the type are turned into `{0 a : Type} ->` implicit binders.
+The case trees are weakened to account for the new arguments, and recursive
+self-calls are patched to include erased type applications.
+
+### Test Results
+
+20/21 progressive tests passing, 793/795 full Idris 2 tests passing (2
+pre-existing chez-backend failures on Windows). Zero regressions.
+
+Full status: `docs/progressive/STATE.md` in the Idris2 repo.
 
 ---
 
@@ -1512,56 +1603,3 @@ export PATH="/home/natanh/Idris2/build/exec:$PATH"  # idris2 binary
 export PATH="/c/Users/natanh/tools/node:$PATH"       # node binary
 ```
 
-## Progressive Idris (Type Inference for Unannotated Definitions)
-
-Our custom Idris2 build includes **progressive type inference** — you can write
-function definitions without type annotations and the compiler will infer types.
-
-### Basic Usage
-
-```idris
--- No type annotation needed:
-add x y = x + y          -- inferred: Integer -> Integer -> Integer
-id' x = x                -- inferred: {0 a : Type} -> a -> a
-const' x y = x           -- inferred: {0 a : Type} -> {0 b : Type} -> a -> b -> a
-myLength [] = 0
-myLength (_ :: xs) = 1 + myLength xs
-                          -- inferred: {0 a : Type} -> List a -> Integer
-```
-
-### Type Generalization
-
-When a function's argument or return type can't be determined from the definition
-(no operator constraints, no constructor patterns), the type is **generalized** —
-unsolved type variables become implicit type parameters. This means functions like
-`id' x = x` are truly polymorphic, not monomorphic `Integer -> Integer`.
-
-### `--show-inferred-types` Flag
-
-Use `--show-inferred-types` with `--check` to see what types the compiler inferred:
-
-```bash
-idris2 --show-inferred-types --check myfile.idr
-# Output:
-# add : Integer -> Integer -> Integer
-# id' : a -> a
-```
-
-### What Works
-
-- Simple aliases: `add x y = x + y`, `double x = x + x`
-- Identity/const: `id x = x`, `const x y = x`
-- Constructor patterns: `myNot True = False; myNot False = True`
-- List patterns: `myLength [] = 0; myLength (_ :: xs) = 1 + myLength xs`
-- Recursive functions: `factorial 0 = 1; factorial n = n * factorial (n - 1)`
-- Case expressions, let bindings, where clauses
-- String literal patterns: `greet "world" = "Hello, World!"; greet n = "Hello, " ++ n`
-- Polymorphic usage: `id' 42` and `id' "hello"` in the same program
-
-### Known Limitations
-
-- **Higher-order functions**: `apply f x = f x` and `myMap f [] = []` fail because
-  the compiler can't infer that `f` is a function type without HM-style unification
-- **Pair patterns**: `myFst (x, _) = x` has an elaboration ordering issue
-- **Typeclass operations on unresolved types**: Functions using `<`, `>`, `compare`
-  fail because `Ord` search runs before the argument type is resolved
