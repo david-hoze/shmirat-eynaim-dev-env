@@ -25,9 +25,6 @@ modules = FFI.Core
         , FFI.DOM.Canvas
         , FFI.DOM.Observer
         , FFI.DOM.Style
-        , FFI.RxJS.Observable
-        , FFI.RxJS.Subject
-        , FFI.RxJS.Operators
         , FFI.ML.FaceApi
         , FFI.ML.CocoSsd
         , FFI.Network
@@ -36,8 +33,13 @@ modules = FFI.Core
         , Extension.Background
         , Extension.Content
         , Extension.Popup
+        , Extension.ContentEarly
         , ML.Detection
         , ML.Learning
+        , Rx.Core
+        , Rx.Observable
+        , Rx.Subject
+        , Rx.Operators
         , Pipeline.Classification
         , Pipeline.Priority
         , UI.Popup

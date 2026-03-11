@@ -1,16 +1,19 @@
--- Pipeline.Classification — RxJS-driven multi-source classification pipeline
+-- Pipeline.Classification — Native Rx multi-source classification pipeline
 --
--- Mirrors the JS createClassificationPipeline function, but with:
---   1. Type-safe Observable composition
+-- Uses the native Rx library (Rx.*) — no RxJS dependency.
+-- The Temperature phantom type tracks Cold vs Hot observables.
+--
+--   1. Type-safe Observable composition (Cold/Hot distinction)
 --   2. ImageRef (URL captured at discovery, never re-read from DOM)
 --   3. Pure priority resolution (no IO in the decision logic)
 
 module Pipeline.Classification
 
 import FFI.Core
-import FFI.RxJS.Observable
-import FFI.RxJS.Subject
-import FFI.RxJS.Operators
+import Rx.Core
+import Rx.Observable
+import Rx.Subject
+import Rx.Operators
 import FFI.Network
 import FFI.ML.FaceApi
 import FFI.ML.CocoSsd
@@ -24,11 +27,12 @@ import Pipeline.Priority
 
 ||| Check local cache for a previously classified URL.
 ||| Returns immediately if found, EMPTY if not.
+||| Returns Cold — each subscriber triggers a fresh cache lookup.
 export
 cacheSource : HasIO io
-  => (ImageUrl -> IO (Maybe ClassificationResult))  -- cache lookup function
+  => (ImageUrl -> IO (Maybe ClassificationResult))
   -> ImageUrl
-  -> io (Observable PrioritizedResult)
+  -> io (Observable Cold PrioritizedResult)
 cacheSource lookupCache url = do
   obs <- defer $ do
     result <- lookupCache url
@@ -45,25 +49,19 @@ cacheSource lookupCache url = do
 ||| Returns a PrioritizedResult with ML priority.
 export
 mlSource : HasIO io
-  => (DataUrl -> IO (Promise (JsArray FaceDetection)))  -- face detection fn
-  -> (DataUrl -> IO (Promise (JsArray Detection)))       -- person detection fn
+  => (DataUrl -> IO (Promise (JsArray FaceDetection)))
+  -> (DataUrl -> IO (Promise (JsArray Detection)))
   -> DataUrl
-  -> io (Observable PrioritizedResult)
+  -> io (Observable Cold PrioritizedResult)
 mlSource detectFacesFn detectPersonsFn dataUrl = do
   obs <- defer $ do
-    -- Run face detection and person detection in parallel (via JS Promise.all)
-    -- For simplicity in Idris FFI, we run them sequentially here.
-    -- In production, wrap both in promises and use Promise.all via FFI.
     facesPromise <- detectFacesFn dataUrl
     faceObs <- fromPromise facesPromise
 
-    -- Process face results and produce classification
     resultObs <- mergeMapObs (\faces => do
-      -- Extract gender info from face detections
       len <- arrayLength faces
       genderPairs <- extractGenders faces 0 len []
 
-      -- Run person detection
       personsPromise <- detectPersonsFn dataUrl
       personObs <- fromPromise personsPromise
       mergeMapObs (\persons => do
@@ -75,7 +73,6 @@ mlSource detectFacesFn detectPersonsFn dataUrl = do
         ) personObs
       ) faceObs
 
-    -- Catch errors → strict mode block
     catchErrorObs (\err => do
       seError $ "ML error: " ++ err
       ofValue $ MkPResult (Block ErrorBlock) PML 0 0
@@ -99,9 +96,9 @@ mlSource detectFacesFn detectPersonsFn dataUrl = do
 ||| Send image to Claude Haiku for classification.
 export
 haikuSource : HasIO io
-  => (DataUrl -> IO (Promise String))  -- rate-limited Haiku call
+  => (DataUrl -> IO (Promise String))
   -> DataUrl
-  -> io (Observable PrioritizedResult)
+  -> io (Observable Cold PrioritizedResult)
 haikuSource classifyFn dataUrl = do
   obs <- defer $ do
     promise <- classifyFn dataUrl
@@ -117,7 +114,7 @@ haikuSource classifyFn dataUrl = do
 
     catchErrorObs (\err => do
       seWarn $ "Haiku error: " ++ err
-      empty  -- Haiku unavailable → no result (don't block pipeline)
+      Rx.Observable.empty
       ) resultObs
   pure obs
 
@@ -128,9 +125,9 @@ haikuSource classifyFn dataUrl = do
 ||| Look up classification from shared server.
 export
 serverSource : HasIO io
-  => (ImageUrl -> IO (Promise JsValue))  -- server lookup fn
+  => (ImageUrl -> IO (Promise JsValue))
   -> ImageUrl
-  -> io (Observable PrioritizedResult)
+  -> io (Observable Cold PrioritizedResult)
 serverSource lookupFn url = do
   obs <- defer $ do
     promise <- lookupFn url
@@ -139,14 +136,12 @@ serverSource lookupFn url = do
     resultObs <- mergeMapObs (\jsVal => do
       nullish <- isNullish jsVal
       if nullish
-        then empty  -- No server result
+        then Rx.Observable.empty
         else do
-          -- Parse server response
-          -- In practice, check voteBlock/voteSafe counts
           ofValue $ MkPResult (Block ServerBlock) PServer 0 0
       ) respObs
 
-    catchErrorObs (\_ => empty) resultObs
+    catchErrorObs (\_ => Rx.Observable.empty) resultObs
   pure obs
 
 ---------------------------------------------------------------------------
@@ -154,27 +149,19 @@ serverSource lookupFn url = do
 ---------------------------------------------------------------------------
 
 ||| Create the full classification pipeline for an image.
-||| Merges cache, ML, server, and Haiku sources.
-||| Returns a Subject that emits the best result as sources complete.
+||| Merges cache, ML, server, and Haiku sources into a Hot shared observable.
 |||
-||| The pipeline uses strict mode resolution:
-|||   - BLOCK wins over SAFE (unless USER says SAFE)
-|||   - First result is emitted immediately
-|||   - Later sources can escalate (safe → block) but not downgrade
+||| Type safety: each source is Cold (per-subscriber), merge produces Cold,
+||| share converts to Hot (multicast). The type tracks this progression.
 export
 createPipeline : HasIO io
-  => Observable PrioritizedResult   -- cache source
-  -> Observable PrioritizedResult   -- ML source
-  -> Observable PrioritizedResult   -- server source
-  -> Observable PrioritizedResult   -- Haiku source
-  -> io (Observable PrioritizedResult)
+  => Observable Cold PrioritizedResult   -- cache source
+  -> Observable Cold PrioritizedResult   -- ML source
+  -> Observable Cold PrioritizedResult   -- server source
+  -> Observable Cold PrioritizedResult   -- Haiku source
+  -> io (Observable Hot PrioritizedResult)
 createPipeline cacheObs mlObs serverObs haikuObs = do
-  -- Merge all sources — they emit independently as they complete
   merged <- merge4 cacheObs mlObs serverObs haikuObs
-
-  -- The priority resolution happens in the subscriber (stateful),
-  -- not in the Observable chain (which is stateless).
-  -- We use share() so multiple subscribers see the same emissions.
   share merged
 
 ---------------------------------------------------------------------------
@@ -182,41 +169,32 @@ createPipeline cacheObs mlObs serverObs haikuObs = do
 ---------------------------------------------------------------------------
 
 ||| Classify an image using the full multi-source pipeline.
-||| Returns a Promise of the first result (for the content script).
-||| The pipeline continues running after the first result — later sources
-||| may trigger overrides via tab messaging.
-|||
-||| Takes an ImageRef (URL already captured, safe from CSS mutation).
+||| Returns a Promise of the first result.
 export
 classifyImage : HasIO io
   => ImageRef
-  -> (ImageUrl -> IO (Maybe ClassificationResult))   -- cache lookup
-  -> (DataUrl -> IO (Promise (JsArray FaceDetection))) -- face detect
-  -> (DataUrl -> IO (Promise (JsArray Detection)))     -- person detect
-  -> (DataUrl -> IO (Promise String))                  -- Haiku classify
-  -> (ImageUrl -> IO (Promise JsValue))                -- server lookup
+  -> (ImageUrl -> IO (Maybe ClassificationResult))
+  -> (DataUrl -> IO (Promise (JsArray FaceDetection)))
+  -> (DataUrl -> IO (Promise (JsArray Detection)))
+  -> (DataUrl -> IO (Promise String))
+  -> (ImageUrl -> IO (Promise JsValue))
   -> io (Promise PrioritizedResult)
 classifyImage ref lookupCache detectFacesFn detectPersonsFn haikuFn serverFn = do
-  -- Create sources
   cacheObs  <- cacheSource lookupCache ref.url
   serverObs <- serverSource serverFn ref.url
 
-  -- ML and Haiku need dataUrl — skip if not available
   mlObs <- case ref.dataUrl of
-    Nothing => empty
+    Nothing => Rx.Observable.empty
     Just du => mlSource detectFacesFn detectPersonsFn du
 
   haikuObs <- case ref.dataUrl of
-    Nothing => empty
+    Nothing => Rx.Observable.empty
     Just du => haikuSource haikuFn du
 
-  -- Merge into pipeline
   pipeline <- createPipeline cacheObs mlObs serverObs haikuObs
 
-  -- Add strict-mode default (if no source emits, block)
   withDefault <- defaultIfEmpty
     (MkPResult (Block NoSources) PCache 0 0)
     pipeline
 
-  -- Return first result as Promise
   firstValueFrom withDefault

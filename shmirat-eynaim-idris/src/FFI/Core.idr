@@ -73,7 +73,7 @@ isNullish v = primIO $ prim__isNullish v
 -- Promise handling (no async/await in Idris — use then-chains)
 ---------------------------------------------------------------------------
 
-%foreign "javascript:lambda:(p, onOk, onErr, w) => p.then(x => onOk(x)(w), e => onErr(String(e))(w))"
+%foreign "javascript:lambda:(_a, _b, p, onOk, onErr, w) => p.then(x => onOk(x)(w), e => onErr(String(e))(w))"
 prim__thenPromise : Promise a -> (a -> PrimIO b) -> (String -> PrimIO b) -> PrimIO (Promise b)
 
 export
@@ -81,14 +81,14 @@ thenPromise : HasIO io => Promise a -> (a -> IO b) -> (String -> IO b) -> io (Pr
 thenPromise p onOk onErr =
   primIO $ prim__thenPromise p (\x => toPrim $ onOk x) (\e => toPrim $ onErr e)
 
-%foreign "javascript:lambda:(x, w) => Promise.resolve(x)"
+%foreign "javascript:lambda:(_a, x, w) => Promise.resolve(x)"
 prim__resolve : a -> PrimIO (Promise a)
 
 export
 resolvePromise : HasIO io => a -> io (Promise a)
 resolvePromise x = primIO $ prim__resolve x
 
-%foreign "javascript:lambda:(p1, p2, w) => Promise.all([p1, p2])"
+%foreign "javascript:lambda:(_a, _b, p1, p2, w) => Promise.all([p1, p2])"
 prim__promiseAll2 : Promise a -> Promise b -> PrimIO (Promise JsValue)
 
 ---------------------------------------------------------------------------
@@ -188,16 +188,16 @@ f32Length a = primIO $ prim__f32Length a
 -- JsArray operations
 ---------------------------------------------------------------------------
 
-%foreign "javascript:lambda:(a, w) => a.length"
+%foreign "javascript:lambda:(_a, arr, w) => arr.length"
 prim__arrayLength : JsArray a -> PrimIO Int32
 
-%foreign "javascript:lambda:(a, i, w) => a[i]"
+%foreign "javascript:lambda:(_a, arr, i, w) => arr[i]"
 prim__arrayGet : JsArray a -> Int32 -> PrimIO a
 
-%foreign "javascript:lambda:(a, x, w) => { a.push(x); return a; }"
+%foreign "javascript:lambda:(_a, arr, x, w) => { arr.push(x); return arr; }"
 prim__arrayPush : JsArray a -> a -> PrimIO (JsArray a)
 
-%foreign "javascript:lambda:(w) => []"
+%foreign "javascript:lambda:(_a, w) => []"
 prim__newArray : PrimIO (JsArray a)
 
 export

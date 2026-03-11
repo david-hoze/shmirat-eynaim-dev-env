@@ -13,13 +13,13 @@ import FFI.DOM.Element
 -- Class manipulation
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, cls, w) => { el.classList.add(cls); }"
+%foreign "browser:lambda:(_s, el, cls, w) => { el.classList.add(cls); }"
 prim__addClass : Element s -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, cls, w) => { el.classList.remove(cls); }"
+%foreign "browser:lambda:(_s, el, cls, w) => { el.classList.remove(cls); }"
 prim__removeClass : Element s -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, cls, w) => el.classList.toggle(cls)"
+%foreign "browser:lambda:(_s, el, cls, w) => el.classList.toggle(cls)"
 prim__toggleClass : Element s -> String -> PrimIO Bool
 
 export
@@ -38,7 +38,7 @@ toggleClass el cls = primIO $ prim__toggleClass el cls
 -- Computed style (safe subset — NO background-image)
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, prop, w) => getComputedStyle(el).getPropertyValue(prop)"
+%foreign "browser:lambda:(_s, el, prop, w) => getComputedStyle(el).getPropertyValue(prop)"
 prim__getComputedProp : Element s -> String -> PrimIO String
 
 -- | Read a computed style property.
@@ -52,13 +52,13 @@ getComputedProp el prop = primIO $ prim__getComputedProp el prop
 -- Inline style
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, prop, val, w) => { el.style.setProperty(prop, val); }"
+%foreign "browser:lambda:(_s, el, prop, val, w) => { el.style.setProperty(prop, val); }"
 prim__setStyle : Element s -> String -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, prop, val, priority, w) => { el.style.setProperty(prop, val, priority); }"
+%foreign "browser:lambda:(_s, el, prop, val, priority, w) => { el.style.setProperty(prop, val, priority); }"
 prim__setStyleImportant : Element s -> String -> String -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, prop, w) => { el.style.removeProperty(prop); }"
+%foreign "browser:lambda:(_s, el, prop, w) => { el.style.removeProperty(prop); }"
 prim__removeStyle : Element s -> String -> PrimIO ()
 
 export

@@ -63,16 +63,16 @@ createElement tag = primIO $ prim__createElement tag
 -- DOM manipulation
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(parent, child, w) => parent.appendChild(child)"
+%foreign "browser:lambda:(_s, _t, parent, child, w) => parent.appendChild(child)"
 prim__appendChild : Element s -> Element t -> PrimIO ()
 
-%foreign "browser:lambda:(el, w) => el.remove()"
+%foreign "browser:lambda:(_s, el, w) => el.remove()"
 prim__remove : Element s -> PrimIO ()
 
-%foreign "browser:lambda:(el, prop, val, w) => { el.style.setProperty(prop, val); }"
+%foreign "browser:lambda:(_s, el, prop, val, w) => { el.style.setProperty(prop, val); }"
 prim__setStyleProp : Element s -> String -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, key, val, w) => { el.setAttribute(key, val); }"
+%foreign "browser:lambda:(_s, el, key, val, w) => { el.setAttribute(key, val); }"
 prim__setAttribute : Element s -> String -> String -> PrimIO ()
 
 export
@@ -95,10 +95,10 @@ setAttribute el key val = primIO $ prim__setAttribute el key val
 -- Text content
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, text, w) => { el.textContent = text; }"
+%foreign "browser:lambda:(_s, el, text, w) => { el.textContent = text; }"
 prim__setTextContent : Element s -> String -> PrimIO ()
 
-%foreign "browser:lambda:(el, w) => el.textContent || ''"
+%foreign "browser:lambda:(_s, el, w) => el.textContent || ''"
 prim__getTextContent : Element s -> PrimIO String
 
 export

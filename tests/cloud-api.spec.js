@@ -5,7 +5,7 @@ const vm = require("vm");
 const fs = require("fs");
 const path = require("path");
 
-const BG_SCRIPT_PATH = path.resolve(__dirname, "../shmirat-eynaim/background.js");
+const BG_SCRIPT_PATH = path.resolve(__dirname, "../shmirat-eynaim/background-idris.js");
 
 /**
  * Create a mock browser environment and load background.js in a VM sandbox.
@@ -50,8 +50,16 @@ function loadBackground(opts = {}) {
       sendMessage: async () => ({}),
       reload: async () => {},
     },
-    menus: null,
-    contextMenus: null,
+    menus: {
+      create: () => {},
+      onClicked: { addListener: () => {} },
+      update: () => {},
+      remove: () => {},
+    },
+    contextMenus: {
+      create: () => {},
+      onClicked: { addListener: () => {} },
+    },
   };
 
   // Mock fetch: intercepts Anthropic API calls
@@ -126,6 +134,8 @@ function loadBackground(opts = {}) {
     console,
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     Date,
     URL,
     Math,
@@ -134,11 +144,41 @@ function loadBackground(opts = {}) {
     Object,
     JSON,
     Map,
+    Set,
+    Number,
+    String,
+    Boolean,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    RegExp,
+    Error,
+    TypeError,
+    RangeError,
+    Symbol,
+    BigInt,
+    Uint8Array,
+    Float32Array,
+    ArrayBuffer,
     FileReader: MockFileReader,
     fetch: mockFetch,
     createImageBitmap: mockCreateImageBitmap,
     OffscreenCanvas: MockOffscreenCanvas,
+    performance: { now: () => Date.now() },
+    crypto: { subtle: { digest: async () => new ArrayBuffer(32) }, getRandomValues: (a) => a },
+    Image: function() { this.onload = null; this.onerror = null; this.src = ''; },
+    Blob: function(parts, opts) { this.type = opts?.type || ''; this.size = 0; },
+    HTMLCanvasElement: function() {},
+    document: { createElement: () => ({ getContext: () => ({ drawImage: () => {}, getImageData: () => ({data:[]}) }), toDataURL: () => 'data:image/jpeg;base64,', width: 0, height: 0 }) },
+    atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+    btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+    encodeURIComponent,
+    decodeURIComponent,
+    unescape,
   };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
 
   const code = fs.readFileSync(BG_SCRIPT_PATH, "utf-8");
   vm.runInNewContext(`(function() { ${code} })()`, sandbox);

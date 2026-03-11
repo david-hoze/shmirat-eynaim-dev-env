@@ -20,7 +20,7 @@ prim__newObserver : (JsArray MutationRecord -> PrimIO ()) -> PrimIO MutationObse
 
 -- | Observe with standard options for image discovery:
 -- childList + subtree + attributes on src/style/data-src etc.
-%foreign "browser:lambda:(obs, target, w) => obs.observe(target, {childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'data-src', 'data-original', 'data-lazy', 'style']})"
+%foreign "browser:lambda:(_s, obs, target, w) => obs.observe(target, {childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'data-src', 'data-original', 'data-lazy', 'style']})"
 prim__observe : MutationObserver -> Element s -> PrimIO ()
 
 %foreign "browser:lambda:(obs, w) => obs.disconnect()"

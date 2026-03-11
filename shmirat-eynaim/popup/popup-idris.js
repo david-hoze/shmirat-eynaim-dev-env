@@ -216,8 +216,7 @@ const _strReverse = x => x.split('').reverse().join('')
 
 const _substr = (o,l,x) => x.slice(o, o + l)
 
-const Extension_Popup_n__2912_7466_prim__initPopup = ((w) => { (async function() { var toggle = document.getElementById('toggle'); var domainEl = document.getElementById('domain'); var statsEl = document.getElementById('stats'); var tabs = await browser.tabs.query({active: true, currentWindow: true}); var currentDomain = ''; if (tabs[0] && tabs[0].url) { try { currentDomain = new URL(tabs[0].url).hostname; } catch(e) {} } if (domainEl) domainEl.textContent = currentDomain; var state = await browser.runtime.sendMessage({type: 'getState'}); if (toggle) toggle.checked = state.blockingEnabled; if (toggle) { toggle.addEventListener('change', async function() { await browser.runtime.sendMessage({type: 'toggle'}); }); } try { var stats = await browser.runtime.sendMessage({type: 'getStats'}); if (statsEl && stats) { statsEl.textContent = 'Scanned: ' + (stats.scanned || 0) + ' | Hidden: ' + (stats.hidden || 0) + ' (face: ' + (stats.hiddenFace || 0) + ', body: ' + (stats.hiddenBody || 0) + ')'; } } catch(e) {} try { var cloud = await browser.runtime.sendMessage({type: 'getCloudStats'}); var cloudEl = document.getElementById('cloud-stats'); if (cloudEl && cloud) { cloudEl.textContent = 'API calls today: ' + (cloud.cloudCallsToday || 0) + ' | Local matches: ' + (cloud.cloudSavedCount || 0); } } catch(e) {} try { var learn = await browser.runtime.sendMessage({type: 'getLearningStats'}); var learnEl = document.getElementById('learning-stats'); if (learnEl && learn) { learnEl.textContent = 'Blocked faces: ' + (learn.knownFacesCount || 0) + ' | Safe faces: ' + (learn.knownSafeFacesCount || 0) + ' | Training: ' + (learn.trainingDataCount || 0); } } catch(e) {} console.log('[Shmirat Eynaim] Popup initialized (Idris)'); })(); });
-const FFI_Core_prim__consoleLog = ((tag, msg, w) => console.log(tag, msg));
+const Extension_Popup_prim__initPopup = ((w) => { var cd = ''; var cs = {}; var toggle = document.getElementById('toggle'); var domainEl = document.getElementById('domain'); var wlBtn = document.getElementById('whitelist-btn'); var wlList = document.getElementById('whitelist-list'); var emptyMsg = document.getElementById('empty-msg'); var statsEl = document.getElementById('stats'); var learnEl = document.getElementById('learning-stats'); var classEl = document.getElementById('classifier-status'); var resetBtn = document.getElementById('reset-btn'); var exportBtn = document.getElementById('export-btn'); var importBtn = document.getElementById('import-btn'); var importFile = document.getElementById('import-file'); var apiKeyInput = document.getElementById('api-key'); var saveKeyBtn = document.getElementById('save-key-btn'); var cloudStatsEl = document.getElementById('cloud-stats'); var cloudRadios = document.querySelectorAll('input[name="cloud-mode"]'); var serverStatusEl = document.getElementById('server-status'); function renderWhitelist(wl) { if (!wlList) return; wlList.innerHTML = ''; if (!wl || wl.length === 0) { if (emptyMsg) emptyMsg.style.display = 'block'; return; } if (emptyMsg) emptyMsg.style.display = 'none'; for (var i = 0; i < wl.length; i++) { (function(domain) { var li = document.createElement('li'); var span = document.createElement('span'); span.textContent = domain; var btn = document.createElement('button'); btn.className = 'btn remove'; btn.textContent = '\u00d7'; btn.title = 'Remove from trusted sites'; btn.addEventListener('click', function() { browser.runtime.sendMessage({ type: 'removeWhitelist', domain: domain }).then(function(resp) { cs = resp; render(); }); }); li.appendChild(span); li.appendChild(btn); wlList.appendChild(li); })(wl[i]); } } function updateWlBtn() { if (!wlBtn) return; var wl = cs.whitelist && cs.whitelist.includes(cd); wlBtn.textContent = wl ? 'Remove trust' : 'Trust this site'; } function updateStats() { browser.runtime.sendMessage({ type: 'getStats' }).then(function(s) { if (statsEl && s) statsEl.textContent = (s.scanned || 0) + ' scanned, ' + (s.hidden || 0) + ' hidden'; }).catch(function() { if (statsEl) statsEl.textContent = '0 scanned, 0 hidden'; }); } function updateLearning() { browser.runtime.sendMessage({ type: 'getLearningStats' }).then(function(s) { if (!s) return; var total = s.knownFacesCount + s.knownSafeFacesCount; if (learnEl) { if (total === 0) learnEl.textContent = 'No faces learned yet.'; else learnEl.textContent = 'Faces learned: ' + total + ' (' + s.knownFacesCount + ' blocked, ' + s.knownSafeFacesCount + ' safe)'; } if (classEl) { if (s.classifierTrained) classEl.textContent = 'Custom model: trained on ' + s.trainingDataCount + ' examples'; else if (s.trainingDataCount > 0) classEl.textContent = 'Custom model: need ' + (10 - s.trainingDataCount) + ' more examples'; else classEl.textContent = 'Custom model: not enough data'; } }).catch(function() { if (learnEl) learnEl.textContent = 'No faces learned yet.'; }); } function updateCloud() { browser.runtime.sendMessage({ type: 'getCloudStats' }).then(function(s) { if (!s) return; cloudRadios.forEach(function(r) { r.checked = r.value === s.cloudMode; }); if (cloudStatsEl) { if (!s.hasApiKey) cloudStatsEl.textContent = 'No API key set.'; else { var cost = (s.cloudCallsToday * 0.002).toFixed(3); cloudStatsEl.textContent = 'Today: ' + s.cloudCallsToday + ' API calls (~$' + cost + ') | ' + s.cloudSavedCount + ' saved locally | ' + s.cloudCacheSize + ' cached URLs'; } } }).catch(function() { if (cloudStatsEl) cloudStatsEl.textContent = 'No API key set.'; }); } function updateServer() { browser.runtime.sendMessage({ type: 'getServerConfig' }).then(function(c) { if (!serverStatusEl) return; if (c && c.serverEnabled) { serverStatusEl.textContent = 'Connected'; serverStatusEl.className = 'server-status connected'; } else { serverStatusEl.textContent = 'Not connected.'; serverStatusEl.className = 'server-status'; } }).catch(function() { if (serverStatusEl) { serverStatusEl.textContent = 'Not connected.'; serverStatusEl.className = 'server-status'; } }); } function render() { if (toggle) toggle.checked = cs.blockingEnabled; if (domainEl) domainEl.textContent = cd || '\u2014'; renderWhitelist(cs.whitelist); updateWlBtn(); updateStats(); updateLearning(); updateCloud(); updateServer(); } browser.tabs.query({ active: true, currentWindow: true }).then(function(tabs) { if (tabs[0] && tabs[0].url) { try { cd = new URL(tabs[0].url).hostname; } catch(e) {} } return browser.runtime.sendMessage({ type: 'getState', domain: cd }); }).then(function(state) { cs = state; render(); }); if (toggle) toggle.addEventListener('change', function() { browser.runtime.sendMessage({ type: 'toggle' }).then(function(resp) { cs = resp; render(); }); }); if (wlBtn) wlBtn.addEventListener('click', function() { if (!cd) return; var isWl = cs.whitelist && cs.whitelist.includes(cd); browser.runtime.sendMessage({ type: isWl ? 'removeWhitelist' : 'addWhitelist', domain: cd }).then(function(resp) { cs = resp; render(); }); }); if (resetBtn) resetBtn.addEventListener('click', function() { if (confirm('Reset all learned faces and the custom model? This cannot be undone.')) { browser.runtime.sendMessage({ type: 'resetLearning' }).then(function() { updateLearning(); }); } }); if (exportBtn) exportBtn.addEventListener('click', function() { browser.runtime.sendMessage({ type: 'exportLearning' }).then(function(data) { var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }); var url = URL.createObjectURL(blob); var a = document.createElement('a'); a.href = url; a.download = 'shmirat-eynaim-learned.json'; a.click(); URL.revokeObjectURL(url); }); }); if (importBtn) importBtn.addEventListener('click', function() { if (importFile) importFile.click(); }); if (importFile) importFile.addEventListener('change', function(e) { var file = e.target.files[0]; if (!file) return; file.text().then(function(text) { var data = JSON.parse(text); return browser.runtime.sendMessage({ type: 'importLearning', data: data }); }).then(function() { updateLearning(); }).catch(function() { alert('Invalid JSON file.'); }); }); if (saveKeyBtn) saveKeyBtn.addEventListener('click', function() { var key = apiKeyInput ? apiKeyInput.value.trim() : ''; browser.runtime.sendMessage({ type: 'setApiKey', key: key }).then(function() { if (apiKeyInput) { apiKeyInput.value = ''; apiKeyInput.placeholder = key ? 'Key saved' : 'Anthropic API key'; } updateCloud(); }); }); cloudRadios.forEach(function(radio) { radio.addEventListener('change', function(e) { browser.runtime.sendMessage({ type: 'setCloudMode', mode: e.target.value }).then(function() { updateCloud(); }); }); }); console.log('[SE] Popup initialized (Idris)'); });
 /* {__mainExpression:0} */
 function __mainExpression_0() {
  return PrimIO_unsafePerformIO($2 => Extension_Popup_main($2));
@@ -230,30 +229,7 @@ function prim__sub_Integer($0, $1) {
 
 /* Extension.Popup.main : IO () */
 function Extension_Popup_main($0) {
- const $11 = b => a => $12 => $13 => $14 => {
-  const $15 = $12($14);
-  const $18 = $13($14);
-  return $15($18);
- };
- const $6 = {a1: b => a => func => $8 => $9 => Prelude_IO_map_Functor_IO(func, $8, $9), a2: a => $f => $10 => $f, a3: $11};
- const $1d = b => a => $1e => $1f => $20 => {
-  const $21 = $1e($20);
-  return $1f($21)($20);
- };
- const $28 = a => $29 => $2a => {
-  const $2b = $29($2a);
-  return $2b($2a);
- };
- const $5 = {a1: $6, a2: $1d, a3: $28};
- const $4 = {a1: $5, a2: a => $31 => $31};
- const $2 = FFI_Core_seLog($4, 'Popup initializing...');
- const $1 = $2($0);
- return Extension_Popup_n__2912_7466_prim__initPopup($0);
-}
-
-/* FFI.Core.seLog : HasIO io => String -> io () */
-function FFI_Core_seLog($0, $1) {
- return $0.a2(undefined)($7 => FFI_Core_prim__consoleLog('[Shmirat Eynaim]', $1, $7));
+ return Extension_Popup_prim__initPopup($0);
 }
 
 /* Prelude.Types.prim__integerToNat : Integer -> Nat */
@@ -296,12 +272,6 @@ function Prelude_EqOrd_x3c_Ord_Integer($0, $1) {
 /* Prelude.EqOrd.compareInteger : Integer -> Integer -> Ordering */
 function Prelude_EqOrd_compareInteger($0, $1) {
  return Prelude_EqOrd_compare_Ord_Integer($0, $1);
-}
-
-/* Prelude.IO.map */
-function Prelude_IO_map_Functor_IO($0, $1, $2) {
- const $3 = $1($2);
- return $0($3);
 }
 
 /* PrimIO.unsafePerformIO : IO a -> a */

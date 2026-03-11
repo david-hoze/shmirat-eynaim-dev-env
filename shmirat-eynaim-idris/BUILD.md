@@ -51,29 +51,25 @@ idris2 --cg javascript --directive pretty -o popup-idris.js src/Extension/Popup.
 
 ## Integration with Extension
 
-The compiled JS files replace their handwritten counterparts:
+The Idris-compiled scripts work alongside pipeline JS files:
 
 1. Copy `background-idris.js` to `shmirat-eynaim/background-idris.js`
 2. Copy `content-idris.js` to `shmirat-eynaim/content-idris.js`
-3. Copy `popup-idris.js` to `shmirat-eynaim/popup/popup-idris.js`
+3. Pipeline files are in `shmirat-eynaim/`: `content-pipeline.js`, `background-pipeline.js`
 
-Update `background.html` to load the Idris-compiled background:
+`background.html` loads libraries, pipeline, then Idris entry point:
 ```html
 <script src="lib/rxjs.umd.min.js"></script>
 <script src="lib/face-api.min.js"></script>
 <script src="lib/tf-global-shim.js"></script>
 <script src="lib/coco-ssd.min.js"></script>
+<script src="background-pipeline.js"></script>
 <script src="background-idris.js"></script>
 ```
 
-Update `manifest.json` content scripts:
+`manifest.json` content scripts load pipeline then Idris:
 ```json
-"js": ["content-idris.js"]
-```
-
-Update `popup/popup.html`:
-```html
-<script src="popup-idris.js"></script>
+"js": ["content-pipeline.js", "content-idris.js"]
 ```
 
 ## Architecture

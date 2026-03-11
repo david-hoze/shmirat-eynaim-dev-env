@@ -52,22 +52,22 @@ RawElement = Element ()
 -- Core DOM operations (work on any element state)
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, w) => el.tagName"
+%foreign "browser:lambda:(_s, el, w) => el.tagName"
 prim__tagName : Element s -> PrimIO String
 
-%foreign "browser:lambda:(el, name, w) => el.getAttribute(name)"
+%foreign "browser:lambda:(_s, el, name, w) => el.getAttribute(name)"
 prim__getAttribute : Element s -> String -> PrimIO JsValue
 
-%foreign "browser:lambda:(el, ns, name, w) => el.getAttributeNS(ns, name)"
+%foreign "browser:lambda:(_s, el, ns, name, w) => el.getAttributeNS(ns, name)"
 prim__getAttributeNS : Element s -> String -> String -> PrimIO JsValue
 
-%foreign "browser:lambda:(el, w) => el.classList"
+%foreign "browser:lambda:(_s, el, w) => el.classList"
 prim__classList : Element s -> PrimIO JsValue
 
-%foreign "browser:lambda:(el, cls, w) => el.classList.contains(cls)"
+%foreign "browser:lambda:(_s, el, cls, w) => el.classList.contains(cls)"
 prim__hasClass : Element s -> String -> PrimIO Bool
 
-%foreign "browser:lambda:(el, w) => { var r = el.getBoundingClientRect(); return {width: r.width, height: r.height}; }"
+%foreign "browser:lambda:(_s, el, w) => { var r = el.getBoundingClientRect(); return {width: r.width, height: r.height}; }"
 prim__boundingRect : Element s -> PrimIO JsObject
 
 export
@@ -90,10 +90,10 @@ hasClass el cls = primIO $ prim__hasClass el cls
 -- Size queries
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, w) => el.naturalWidth || 0"
+%foreign "browser:lambda:(_s, el, w) => el.naturalWidth || 0"
 prim__naturalWidth : Element s -> PrimIO Int32
 
-%foreign "browser:lambda:(el, w) => el.naturalHeight || 0"
+%foreign "browser:lambda:(_s, el, w) => el.naturalHeight || 0"
 prim__naturalHeight : Element s -> PrimIO Int32
 
 export
@@ -122,6 +122,53 @@ boundingRect el = do
     prim__objGetDouble : JsObject -> String -> PrimIO Double
 
 ---------------------------------------------------------------------------
+-- SVG detection
+--
+-- Large SVGs (viewBox > 100x100 or rendered size > 100x100) are potential
+-- ad banners or hero images that need ML classification.
+-- Small SVGs without <image> children are icons — skip them.
+---------------------------------------------------------------------------
+
+%foreign "javascript:lambda:(_s, svg, w) => { var vb = svg.getAttribute('viewBox'); if (vb) { var p = vb.split(/[\\s,]+/); if (p.length === 4 && parseFloat(p[2]) > 100 && parseFloat(p[3]) > 100) return 1; } var r = svg.getBoundingClientRect(); return (r.width > 100 && r.height > 100) ? 1 : 0; }"
+prim__isSvgLarge : Element s -> PrimIO Int32
+
+||| Check if an SVG element is large enough to be a potential image
+||| (ad banner, hero image, etc.) rather than an icon.
+||| Checks viewBox dimensions > 100x100, falling back to bounding rect.
+export
+isSvgLarge : HasIO io => Element s -> io Bool
+isSvgLarge el = do
+  r <- primIO $ prim__isSvgLarge el
+  pure (r == 1)
+
+%foreign "javascript:lambda:(_s, svg, w) => svg.querySelector('image[href], image[xlink\\\\:href]') !== null ? 1 : 0"
+prim__svgHasImageChild : Element s -> PrimIO Int32
+
+||| Check if an SVG contains an <image> child element.
+export
+svgHasImageChild : HasIO io => Element s -> io Bool
+svgHasImageChild el = do
+  r <- primIO $ prim__svgHasImageChild el
+  pure (r == 1)
+
+||| An SVG should be treated as a discoverable image if it either
+||| contains an <image> child OR is large enough to be a potential ad/photo.
+export
+isSvgImage : HasIO io => Element s -> io Bool
+isSvgImage el = do
+  hasChild <- svgHasImageChild el
+  if hasChild then pure True else isSvgLarge el
+
+%foreign "javascript:lambda:(_s, svg, w) => { try { var s = new XMLSerializer().serializeToString(svg); return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(s))); } catch(e) { return ''; } }"
+prim__svgSerializeUrl : Element s -> PrimIO String
+
+||| Serialize an SVG element to a data:image/svg+xml;base64,... URL.
+||| This captures the SVG content as an Idris String, independent of the DOM.
+export
+svgSerializeUrl : HasIO io => Element s -> io String
+svgSerializeUrl el = primIO $ prim__svgSerializeUrl el
+
+---------------------------------------------------------------------------
 -- Image source extraction
 --
 -- CRITICAL: This is the function that was broken by the CSS-JS coupling bug.
@@ -133,21 +180,21 @@ boundingRect el = do
 -- You literally cannot call it on an Element Pending.
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, w) => el.currentSrc || el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || ''"
+%foreign "browser:lambda:(_s, el, w) => el.currentSrc || el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || ''"
 prim__imgSrc : Element s -> PrimIO String
 
-%foreign "browser:lambda:(el, w) => el.getAttribute('poster') || ''"
+%foreign "browser:lambda:(_s, el, w) => el.getAttribute('poster') || ''"
 prim__posterSrc : Element s -> PrimIO String
 
-%foreign "browser:lambda:(el, w) => { var img = el.querySelector('image[href], image[xlink\\\\:href]'); return img ? (img.getAttribute('href') || img.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '') : ''; }"
+%foreign "browser:lambda:(_s, el, w) => { var img = el.querySelector('image[href], image[xlink\\\\:href]'); return img ? (img.getAttribute('href') || img.getAttributeNS('http://www.w3.org/1999/xlink', 'href') || '') : ''; }"
 prim__svgImageHref : Element s -> PrimIO String
 
 -- Read inline style (immune to CSS cascade overrides)
-%foreign "browser:lambda:(el, w) => { var bg = el.style.backgroundImage; if (bg && bg !== 'none' && bg.includes('url(')) { var m = bg.match(/url\\([\"']?(.+?)[\"']?\\)/); return m ? m[1] : ''; } return ''; }"
+%foreign "browser:lambda:(_s, el, w) => { var bg = el.style.backgroundImage; if (bg && bg !== 'none' && bg.includes('url(')) { var m = bg.match(/url\\([\"']?(.+?)[\"']?\\)/); return m ? m[1] : ''; } return ''; }"
 prim__inlineBgUrl : Element s -> PrimIO String
 
 -- Fallback: read computed style (affected by CSS rules — use only for non-inline BG)
-%foreign "browser:lambda:(el, w) => { var bg = getComputedStyle(el).backgroundImage; if (bg && bg !== 'none') { var m = bg.match(/url\\([\"']?(.+?)[\"']?\\)/); return m ? m[1] : ''; } return ''; }"
+%foreign "browser:lambda:(_s, el, w) => { var bg = getComputedStyle(el).backgroundImage; if (bg && bg !== 'none') { var m = bg.match(/url\\([\"']?(.+?)[\"']?\\)/); return m ? m[1] : ''; } return ''; }"
 prim__computedBgUrl : Element s -> PrimIO String
 
 ||| Extract the image URL from a discovered element.
@@ -157,8 +204,10 @@ prim__computedBgUrl : Element s -> PrimIO String
 ||| you can no longer call this function — the type checker prevents it.
 ||| The URL must be extracted BEFORE marking pending.
 |||
-||| This is the Idris solution to the CSS-JS coupling bug:
-||| the proof that the element hasn't been CSS-modified is encoded in the type.
+||| For SVG elements: if the SVG has an <image> child, extracts the href.
+||| If the SVG is large (ad banner) but has no <image> child, serializes
+||| the entire SVG to a data URL — capturing its content before CSS can
+||| modify it.
 export
 getImageSrc : HasIO io => Element Discovered -> io ImageUrl
 getImageSrc el = do
@@ -167,14 +216,25 @@ getImageSrc el = do
     "IMG"   => primIO $ prim__imgSrc el
     "IMAGE" => primIO $ prim__imgSrc el
     "VIDEO" => primIO $ prim__posterSrc el
-    "svg"   => primIO $ prim__svgImageHref el
-    "SVG"   => primIO $ prim__svgImageHref el
+    "svg"   => svgSrc el
+    "SVG"   => svgSrc el
     _       => do
       -- Background image: read inline first (immune to CSS), then computed
       inlineBg <- primIO $ prim__inlineBgUrl el
       if inlineBg /= ""
         then pure inlineBg
         else primIO $ prim__computedBgUrl el
+  where
+    svgSrc : Element Discovered -> io ImageUrl
+    svgSrc svg = do
+      href <- primIO $ prim__svgImageHref svg
+      if href /= ""
+        then pure href
+        else do
+          large <- isSvgLarge svg
+          if large
+            then svgSerializeUrl svg  -- Capture SVG content as data URL
+            else pure ""
 
 ---------------------------------------------------------------------------
 -- State transitions
@@ -233,7 +293,7 @@ overrideToSafe el = primIO $ prim__overrideToSafe el
 -- Casting (escape hatch for runtime element lookups)
 ---------------------------------------------------------------------------
 
-%foreign "javascript:lambda:(el, w) => el"
+%foreign "javascript:lambda:(_s, _t, el, w) => el"
 prim__castElement : Element s -> PrimIO (Element t)
 
 ||| Unsafe cast — use only when you have runtime evidence of the state
@@ -246,7 +306,7 @@ unsafeCastElement el = primIO $ prim__castElement el
 -- Event listeners
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, event, handler, w) => el.addEventListener(event, e => handler(e)(w))"
+%foreign "browser:lambda:(_s, el, event, handler, w) => el.addEventListener(event, e => handler(e)(w))"
 prim__addEventListener : Element s -> String -> (JsValue -> PrimIO ()) -> PrimIO ()
 
 export
@@ -258,10 +318,10 @@ addEventListener el event handler =
 -- Query selectors (return untyped / Discovered elements)
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, sel, w) => el.querySelectorAll(sel)"
+%foreign "browser:lambda:(_s, el, sel, w) => el.querySelectorAll(sel)"
 prim__querySelectorAll : Element s -> String -> PrimIO (JsArray RawElement)
 
-%foreign "browser:lambda:(el, sel, w) => el.querySelector(sel)"
+%foreign "browser:lambda:(_s, el, sel, w) => el.querySelector(sel)"
 prim__querySelector : Element s -> String -> PrimIO JsValue
 
 export
@@ -272,9 +332,33 @@ querySelectorAll el sel = primIO $ prim__querySelectorAll el sel
 -- Image element properties
 ---------------------------------------------------------------------------
 
-%foreign "browser:lambda:(el, w) => el.complete || false"
+%foreign "browser:lambda:(_s, el, w) => el.complete || false"
 prim__imgComplete : Element s -> PrimIO Bool
 
 export
 imgComplete : HasIO io => Element s -> io Bool
 imgComplete el = primIO $ prim__imgComplete el
+
+---------------------------------------------------------------------------
+-- Background image detection
+---------------------------------------------------------------------------
+
+%foreign "javascript:lambda:(_s, el, w) => { var bg = el.style.backgroundImage; return (bg && bg !== 'none' && bg.includes('url(')) ? 1 : 0; }"
+prim__hasBgImage : Element s -> PrimIO Int32
+
+||| Check if an element has a background-image set in its inline style.
+export
+hasBgImage : HasIO io => Element s -> io Bool
+hasBgImage el = do
+  r <- primIO $ prim__hasBgImage el
+  pure (r == 1)
+
+%foreign "javascript:lambda:(_s, el, w) => el.hasAttribute('poster') ? 1 : 0"
+prim__hasPoster : Element s -> PrimIO Int32
+
+||| Check if a video element has a poster attribute.
+export
+hasPoster : HasIO io => Element s -> io Bool
+hasPoster el = do
+  r <- primIO $ prim__hasPoster el
+  pure (r == 1)
